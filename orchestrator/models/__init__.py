@@ -67,14 +67,17 @@ class ToolDefinition(BaseModel):
     status: str = "active"
 
     def compute_fingerprint(self) -> str:
-        """Compute deterministic SHA256 fingerprint for schema and endpoint."""
+        """Compute deterministic SHA256 fingerprint for canonical contract content with stable key ordering.
+        Excludes lifecycle metadata such as version, status, and candidate IDs.
+        """
         payload = {
             "name": self.name,
-            "version": self.version,
             "endpoint": self.endpoint,
-            "method": self.method,
+            "method": self.method.upper(),
             "argument_schema": self.argument_schema.model_dump(),
             "request_mapping": self.request_mapping,
+            "response_mapping": self.response_mapping,
+            "headers": self.headers,
             "credential_reference": self.credential_reference
         }
         raw = json.dumps(payload, sort_keys=True)

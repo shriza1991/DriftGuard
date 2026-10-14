@@ -39,3 +39,28 @@
 - **Context**: In production, downstream services may not be available at orchestrator startup.
 - **Decision**: The orchestrator lifespan initializes client connection pools with finite timeouts and does not execute network or LLM calls during startup. Custom `httpx.AsyncBaseTransport` can be injected for offline deterministic testing.
 - **Rationale**: Ensures fast, deterministic container and test startup with zero network flakiness.
+
+## ADR-009: In-Memory Versioned Registry Lifecycle and Atomic Commit
+- **Context**: When hot-committing contract patches, concurrent runs or stale proposals could cause race conditions or corrupt the active registry.
+- **Decision**: The `VersionedToolRegistry` manages immutable snapshots via defensive deep copies, preserves full historical snapshots in chronological order, stages candidates under unique IDs without mutating active definitions, and executes atomic version-checked commits.
+- **Rationale**: Prevents partial mutations, race condition overwrites, and state corruption.
+
+## ADR-010: Canonical Contract Fingerprinting
+- **Context**: Contract versions and candidate IDs change across staging/commit lifecycles, and dictionary key order can vary across platforms.
+- **Decision**: Contract fingerprints are computed using SHA-256 over canonical contract content with `json.dumps(..., sort_keys=True)`. Lifecycle metadata (`version`, `status`, `candidate_id`) and actual secret credentials are strictly excluded.
+- **Rationale**: Ensures fingerprint stability across non-semantic variations (e.g. key order) while remaining strictly sensitive to schema, endpoint, or mapping changes.
+
+## ADR-011: Re-Entrant Per-Tool Locking (`AsyncRLock`)
+- **Context**: When future recovery code acquires a tool lock to execute staged retries and then calls `commit_candidate`, a standard `asyncio.Lock` causes a deadlock.
+- **Decision**: The registry uses `AsyncRLock` keyed to `asyncio.current_task()`. Calling nested registry operations from the task already holding the lock succeeds re-entrantly. Different tools use independent locks and run concurrently without contention.
+- **Rationale**: Guarantees concurrency safety while preventing task self-deadlocks.
+
+---
+
+## Technical Clarifications & Invariant Reminders
+
+> [!IMPORTANT]
+> **Observation vs. Proof**:
+> 1. `expected_schema` alone in an error response does **not** establish semantic field correspondence (e.g. that `assignee_id` corresponds to `user_id`).
+> 2. An HTTP `401 Unauthorized` or `422 Unprocessable Content` status alone does **not** prove contract drift (it may indicate genuine authorization failure or bad caller intent).
+> 3. Classification, diagnosis, and transformation inference remain explicitly pending for future tasks and must not be assumed during registry operations.

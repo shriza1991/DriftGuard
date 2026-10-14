@@ -3,7 +3,7 @@ import uuid
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 
-from orchestrator.registry.default_tools import create_default_registry
+from orchestrator.registry import VersionedToolRegistry
 from orchestrator.execution.events import event_broadcaster
 from orchestrator.execution.tool_caller import http_tool_caller, ToolExecutionError
 from orchestrator.healing.stubs import healing_engine
@@ -15,11 +15,11 @@ class WorkflowExecutionManager:
     """Manages execution of the canonical DriftGuard workflow:
     'Find Maya's user ID, assign ticket 81 to her, and confirm the updated assignee.'
     """
-    def __init__(self):
-        self._registry = create_default_registry()
+    def __init__(self, registry: Optional[VersionedToolRegistry] = None):
+        self._registry = registry or VersionedToolRegistry.create_default()
         self._runs_store: Dict[str, Dict[str, Any]] = {}
 
-    def get_registry(self):
+    def get_registry(self) -> VersionedToolRegistry:
         return self._registry
 
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
@@ -27,7 +27,7 @@ class WorkflowExecutionManager:
 
     def reset(self):
         self._runs_store.clear()
-        self._registry = create_default_registry()
+        self._registry = VersionedToolRegistry.create_default()
         event_broadcaster.reset()
         metrics_tracker.reset()
         audit_logger.reset()

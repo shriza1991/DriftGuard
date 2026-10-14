@@ -110,11 +110,11 @@ async def get_run_events_stream(run_id: str, request: Request):
 
 @router.get("/registry", response_model=RegistryResponse)
 async def get_registry():
-    """Returns all registered tool entries, schemas, methods and fingerprints."""
+    """Returns all registered active tool entries, schemas, methods and fingerprints."""
     registry = workflow_manager.get_registry()
     from datetime import datetime, timezone
     return RegistryResponse(
-        tools=list(registry.values()),
+        tools=registry.list_active(),
         version="v1",
         updated_at=datetime.now(timezone.utc).isoformat()
     )

@@ -4,15 +4,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from orchestrator.api.routes import router as orchestrator_router
 from orchestrator.config import settings
 from orchestrator.client.mock_client import MockBusinessApiClient
+from orchestrator.registry import VersionedToolRegistry
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Orchestrator lifespan manager.
-    Initializes shared business client on app state with finite timeouts.
+    Initializes shared business client and tool registry on app state with finite timeouts.
     Does NOT require a live mock API or model provider call to complete startup.
     Ensures safe async cleanup on shutdown.
     """
+    if not hasattr(app.state, "registry") or app.state.registry is None:
+        app.state.registry = VersionedToolRegistry.create_default()
     if not hasattr(app.state, "mock_client") or app.state.mock_client is None:
         app.state.mock_client = MockBusinessApiClient(base_url=settings.mock_api_url)
     yield
@@ -27,7 +30,8 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Initialize client on app state for non-lifespan ASGI test clients
+# Initialize registry and client on app state for direct ASGI test clients
+app.state.registry = VersionedToolRegistry.create_default()
 app.state.mock_client = MockBusinessApiClient(base_url=settings.mock_api_url)
 
 app.add_middleware(
@@ -52,6 +56,7 @@ async def health_check():
         "mock_api_url": settings.mock_api_url,
         "model_provider": settings.model_provider,
         "version": "1.0.0",
+        "registry_initialized": hasattr(app.state, "registry") and app.state.registry is not None,
         "client_initialized": hasattr(app.state, "mock_client") and app.state.mock_client is not None
     }
 
