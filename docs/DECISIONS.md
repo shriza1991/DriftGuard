@@ -149,18 +149,33 @@
   5. The evidence packet is bounded to 4000 characters with all credentials/secrets recursively redacted. If essential evidence exceeds the budget, diagnosis refuses rather than silently truncating.
 - **Rationale**: Enables robust interpretation of natural language drift evidence while preventing prompt-injection exploits and preserving strict security boundaries.
 
-## ADR-027: Strict Natural Language Evidence Grammar and Independent Validator Authorization
-- **Context**: If an LLM proposes argument renaming, nesting, or type conversion based on natural language error text, trusting the model's self-reported mapping or confidence introduces hallucinations (e.g. guessing that missing `assignee_id` corresponds to `user_id` without explicit correspondence evidence).
+## ADR-028: SQLite-Backed Persistent Audit Store with Async Worker Execution and Secret Redaction
+- **Context**: Audit history and metrics must survive process restarts and serve Member 3 dashboard queries without blocking the asynchronous FastAPI event loop or exposing sensitive credentials.
 - **Decision**:
-  1. The LLM must output structured JSON matching the established proposal format (`rename_argument`, `nest_argument`, `cast_type`, `set_header`) accompanied by verbatim `evidence_quote` and `evidence_path`.
-  2. Local diagnoser validation strictly rejects unknown fields, malformed paths, path traversal or `/admin` endpoints, and non-lossless conversions.
-  3. Model confidence or semantic similarity is **never** accepted as evidence.
-  4. The deterministic safety validator independently verifies the quoted natural language text against the original observation:
-     - Rename operations require explicit correspondence phrasing connecting source and target (e.g. `renamed to`, `deprecated ... use`, `use ... instead of`, `replaced by`, `->`). A missing-field error alone (e.g. `Missing required parameter: assignee_id`) strictly cannot authorize a rename.
-     - Nesting operations require explicit nesting markers (e.g. `nested under`, `moved under`, `sub-object`, `expected object`).
-     - Type conversions require explicit expected type evidence and must satisfy the lossless lexical invertibility allowlist.
-  5. At most ONE LLM diagnosis call and at most ONE repaired HTTP dispatch are permitted per logical operation.
-- **Rationale**: Enforces AGENTS.md Invariant 2: "Model proposes, deterministic validation authorizes."
+  1. Audit data is persisted in a local SQLite database (`driftguard.sqlite3`) using Write-Ahead Logging (`PRAGMA journal_mode = WAL`), foreign keys, and bounded busy timeouts.
+  2. All SQLite operations execute in threadpool workers via `asyncio.to_thread`, ensuring zero event-loop blocking.
+  3. Schema migration table (`schema_migrations`) tracks explicit versions (initial v1).
+  4. Parameterized SQL queries prevent SQL injection.
+  5. Recursive secret redaction (`redact_secrets`) strips authorization headers, API keys, and credentials before serialization. Prompts, chain-of-thought, credentials, and mock admin answers are strictly omitted.
+- **Rationale**: Delivers lightweight, robust relational persistence without unnecessary ORM overhead while maintaining zero credential leakage.
+
+## ADR-029: Truthful Persistence Failure Policies: Pre-Write Blocking and Post-Write Incomplete Auditing
+- **Context**: Database failures can occur either before a mutating HTTP call is dispatched or after a mutation has already executed downstream.
+- **Decision**:
+  1. *Pre-Write Audit Failure*: Before a repaired mutating call is dispatched in recovery, a pre-write audit event is required. If persistence fails, the mutating dispatch is strictly blocked, `business_effect_occurred` remains `False`, and recovery terminates immediately with an audit failure reason.
+  2. *Post-Write Audit Failure*: If persistence fails after a mutating HTTP write has completed (`business_effect_occurred = True`), the run is flagged with `audit_status = 'incomplete'`. The orchestrator preserves available outcome and write uncertainty without repeating the mutating write or claiming rollback.
+  3. *Process Restart / Interrupted Runs*: On database initialization, nonterminal runs (`running`, `pending`) are marked `status = 'interrupted'`, `termination_reason = 'system_interrupted_restart'`, and `audit_status = 'incomplete'`. Repaired writes are never resumed or replayed automatically.
+  4. *Registry In-Memory Isolation*: The active tool registry remains strictly in-memory. Persisted repair candidate definitions in SQLite are historical audit artifacts and are never activated automatically into the registry on restart.
+- **Rationale**: Prevents unverified duplicate writes and maintains strict audit truthfulness under database infrastructure failure.
+
+## ADR-030: Truthful Per-Run Metrics Accounting, Separated Latencies, and Demo Reset Isolation
+- **Context**: Aggregate metrics (MTTR, adaptation rate, token savings) can be distorted if failed recovery times are averaged with successful recoveries, if commit latencies are conflated with API recovery, or if incomplete token counts are fabricated as complete.
+- **Decision**:
+  1. *Per-Run Metrics*: `RunMetrics` tracks exact model turns, tool dispatch counts (original vs. repaired), repair attempts, rejections, verified recoveries, and commits.
+  2. *Separated Timing*: Monotonic clocks (`time.perf_counter()`) measure live elapsed durations. Recovery duration measures from first observed failure to successful independent read verification (`get_ticket`). Commit latency is measured separately. Failed or refused recovery durations are tracked separately and never blended into successful recovery averages.
+  3. *Truthful Token Accounting*: Real token counts are categorized as `complete`, `incomplete`, or `unavailable`. Incomplete counts preserve known subtotals without pretending to be complete. Session usage reconciles agent and diagnosis usage without double-counting.
+  4. *Demo Reset Isolation*: `POST /demo/reset` clears in-memory runs, listeners, metrics, and resets the tool registry to canonical v1. The persistent SQLite audit store is strictly preserved, and no destructive public table-drop endpoint is provided.
+- **Rationale**: Guarantees scientific evaluation integrity for Member 1 and prevents synthetic or misleading dashboard metrics for Member 3.
 
 ---
 
@@ -174,6 +189,8 @@
 > 4. Proposed repair candidates remain strictly `proposed_unvalidated` until validated by Task 7 and staged/committed by Task 8.
 > 5. Validated candidates are marked `status: "validated_not_committed"`. Validation is a point-in-time check; Task 8 re-verifies version freshness under the tool lock before recovery dispatch.
 > 6. LLM proposals have `source: "llm_assisted"` and are authorized through the identical deterministic safety validator as deterministic proposals. Neither source confers automatic authorization.
+> 7. Pre-write audit failures strictly halt mutating recovery; post-write audit failures flag `audit_incomplete` without repeating writes.
+> 8. Demo reset preserves SQLite audit history; startup never auto-activates persisted patches.
 
 
 

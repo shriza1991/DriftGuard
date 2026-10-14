@@ -72,6 +72,9 @@ class RecoveryResult(BaseModel):
     verification_details: Optional[Dict[str, Any]] = None
     termination_reason: Optional[str] = None
     duration_ms: float = 0.0
+    recovery_duration_ms: Optional[float] = None
+    commit_latency_ms: Optional[float] = None
+    failed_recovery_duration_ms: Optional[float] = None
     diagnosis_source: str = "deterministic"
     diagnosis_tokens: int = 0
     diagnosis_token_details: Optional[Dict[str, int]] = None
@@ -162,6 +165,7 @@ class RecoveryController:
         execution_guarantees: Optional[Dict[str, Any]] = None,
         llm_diagnoser: Optional[Any] = None,
         diagnosis_timeout: float = 10.0,
+        audit_store: Optional[Any] = None,
     ):
         self.registry = registry
         self.executor = executor
@@ -174,6 +178,7 @@ class RecoveryController:
         self.execution_guarantees = execution_guarantees or {}
         self.llm_diagnoser = llm_diagnoser
         self.diagnosis_timeout = diagnosis_timeout
+        self.audit_store = audit_store
 
         # Track attempted proposal fingerprints per logical operation to prevent repeated cycles
         self._attempted_proposals: Set[str] = set()
@@ -199,6 +204,63 @@ class RecoveryController:
                 tool=tool,
                 data=data,
             )
+
+    async def _audit_repair_attempt(
+        self,
+        run_id: str,
+        res: RecoveryResult,
+        proposal: Optional[Dict[str, Any]] = None,
+        candidate_definition: Optional[Dict[str, Any]] = None,
+        validation_status: str = "none",
+        validation_details: Optional[Dict[str, Any]] = None,
+    ):
+        """Records repair attempt outcome truthfully into persistent audit store."""
+        if self.audit_store is None:
+            return
+        try:
+            await self.audit_store.record_repair_attempt(
+                run_id=run_id,
+                tool_name=res.tool_name,
+                base_version=res.base_version,
+                base_fingerprint=res.base_fingerprint,
+                proposal_fingerprint=res.proposal_fingerprint or f"fp_none_{res.tool_name}",
+                candidate_id=res.candidate_id,
+                candidate_version=res.committed_version,
+                candidate_fingerprint=res.committed_fingerprint,
+                diagnosis_source=res.diagnosis_source,
+                diagnosis_tokens=res.diagnosis_tokens,
+                proposal=proposal or {},
+                candidate_definition=candidate_definition,
+                validation_status=validation_status,
+                validation_details=validation_details,
+                recovery_status=res.status.value,
+                business_effect_occurred=res.business_effect_occurred,
+                verification_succeeded=res.verification_succeeded,
+                registry_committed=res.registry_committed,
+                committed_version=res.committed_version,
+                termination_reason=res.termination_reason,
+                recovery_duration_ms=res.recovery_duration_ms,
+                commit_latency_ms=res.commit_latency_ms,
+                failed_recovery_duration_ms=res.failed_recovery_duration_ms,
+            )
+            if res.diagnosis_tokens > 0:
+                diag_inp = res.diagnosis_token_details.get("input_tokens") if res.diagnosis_token_details else None
+                diag_out = res.diagnosis_token_details.get("output_tokens") if res.diagnosis_token_details else None
+                await self.audit_store.record_model_usage(
+                    run_id=run_id,
+                    call_id=f"diag-{res.proposal_fingerprint[:8] if res.proposal_fingerprint else res.tool_name}",
+                    purpose="diagnosis",
+                    prompt_tokens=diag_inp,
+                    completion_tokens=diag_out,
+                    total_tokens=res.diagnosis_tokens,
+                    is_complete=True,
+                )
+        except Exception:
+            if res.business_effect_occurred:
+                try:
+                    await self.audit_store.mark_audit_incomplete(run_id)
+                except Exception:
+                    pass
 
     async def recover_failure(
         self,
@@ -498,7 +560,8 @@ class RecoveryController:
                 )
 
                 if val_result.status != ValidationStatus.ACCEPTED or not val_result.authorized_for_recovery:
-                    return RecoveryResult(
+                    failed_dur = round((time.perf_counter() - start_time) * 1000, 2)
+                    res = RecoveryResult(
                         status=RecoveryStatus.VALIDATION_REJECTED,
                         recovered=False,
                         tool_name=tool_name,
@@ -506,11 +569,20 @@ class RecoveryController:
                         base_fingerprint=active_fp,
                         proposal_fingerprint=proposal_fp,
                         termination_reason=f"Validator rejected proposal: {'; '.join(val_result.rejection_reasons)}",
-                        duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
+                        duration_ms=failed_dur,
+                        failed_recovery_duration_ms=failed_dur,
                         diagnosis_source=diagnosis_source,
                         diagnosis_tokens=diagnosis_tokens,
                         diagnosis_token_details=diagnosis_token_details,
                     )
+                    await self._audit_repair_attempt(
+                        run_id=run_id,
+                        res=res,
+                        proposal=plan_result.proposal.model_dump() if (plan_result and plan_result.proposal) else {},
+                        validation_status=val_result.status.value,
+                        validation_details=val_result.model_dump(),
+                    )
+                    return res
 
                 # -------------------------------------------------------------
                 # 6. Stage Validated Candidate
@@ -527,6 +599,47 @@ class RecoveryController:
                 # 7. Single Repaired HTTP Execution
                 # -------------------------------------------------------------
                 self._dispatched_operations.add(op_key)
+
+                # Pre-write audit hook: required persistence failure prevents repaired mutating dispatch
+                if self.audit_store is not None:
+                    try:
+                        await self.audit_store.record_pre_write_audit(
+                            run_id=run_id,
+                            tool_name=tool_name,
+                            candidate_id=staged_candidate_id,
+                            candidate_version=staged.target_version,
+                            proposal_fingerprint=proposal_fp,
+                            operation_identity=operation_identity.key if operation_identity else f"{tool_name}:{staged.target_version}",
+                        )
+                    except Exception as pre_write_err:
+                        failed_dur = round((time.perf_counter() - start_time) * 1000, 2)
+                        res = RecoveryResult(
+                            status=RecoveryStatus.EXECUTION_FAILED,
+                            recovered=False,
+                            tool_name=tool_name,
+                            base_version=active_tool.version,
+                            base_fingerprint=active_fp,
+                            proposal_fingerprint=proposal_fp,
+                            candidate_id=staged_candidate_id,
+                            business_effect_occurred=False,
+                            verification_succeeded=False,
+                            registry_committed=False,
+                            termination_reason=f"Pre-write audit persistence failed; mutating dispatch blocked: {pre_write_err}",
+                            duration_ms=failed_dur,
+                            failed_recovery_duration_ms=failed_dur,
+                            diagnosis_source=diagnosis_source,
+                            diagnosis_tokens=diagnosis_tokens,
+                            diagnosis_token_details=diagnosis_token_details,
+                        )
+                        await self._audit_repair_attempt(
+                            run_id=run_id,
+                            res=res,
+                            proposal=plan_result.proposal.model_dump() if (plan_result and plan_result.proposal) else {},
+                            candidate_definition=candidate_tool.model_dump() if candidate_tool else None,
+                            validation_status=val_result.status.value,
+                            validation_details=val_result.model_dump(),
+                        )
+                        return res
 
                 self._emit_event(
                     run_id=run_id,
@@ -557,9 +670,10 @@ class RecoveryController:
 
                 if not executed_res.is_success:
                     err_msg = executed_res.failure.message if executed_res.failure else "Repaired execution failed"
+                    failed_dur = round((time.perf_counter() - start_time) * 1000, 2)
                     if executed_res.failure and executed_res.failure.uncertain_write:
                         uncertain_reason = "Repaired execution produced an uncertain write downstream. Halting without further retry."
-                        return RecoveryResult(
+                        res = RecoveryResult(
                             status=RecoveryStatus.EXECUTION_FAILED,
                             recovered=False,
                             tool_name=tool_name,
@@ -572,30 +686,41 @@ class RecoveryController:
                             registry_committed=False,
                             execution_result=executed_res,
                             termination_reason=uncertain_reason,
-                            duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
+                            duration_ms=failed_dur,
+                            failed_recovery_duration_ms=failed_dur,
                             diagnosis_source=diagnosis_source,
                             diagnosis_tokens=diagnosis_tokens,
                             diagnosis_token_details=diagnosis_token_details,
                         )
-
-                    return RecoveryResult(
-                        status=RecoveryStatus.EXECUTION_FAILED,
-                        recovered=False,
-                        tool_name=tool_name,
-                        base_version=active_tool.version,
-                        base_fingerprint=active_fp,
-                        proposal_fingerprint=proposal_fp,
-                        candidate_id=staged_candidate_id,
-                        business_effect_occurred=False,
-                        verification_succeeded=False,
-                        registry_committed=False,
-                        execution_result=executed_res,
-                        termination_reason=f"Repaired execution failed: {err_msg}",
-                        duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
-                        diagnosis_source=diagnosis_source,
-                        diagnosis_tokens=diagnosis_tokens,
-                        diagnosis_token_details=diagnosis_token_details,
+                    else:
+                        res = RecoveryResult(
+                            status=RecoveryStatus.EXECUTION_FAILED,
+                            recovered=False,
+                            tool_name=tool_name,
+                            base_version=active_tool.version,
+                            base_fingerprint=active_fp,
+                            proposal_fingerprint=proposal_fp,
+                            candidate_id=staged_candidate_id,
+                            business_effect_occurred=False,
+                            verification_succeeded=False,
+                            registry_committed=False,
+                            execution_result=executed_res,
+                            termination_reason=f"Repaired execution failed: {err_msg}",
+                            duration_ms=failed_dur,
+                            failed_recovery_duration_ms=failed_dur,
+                            diagnosis_source=diagnosis_source,
+                            diagnosis_tokens=diagnosis_tokens,
+                            diagnosis_token_details=diagnosis_token_details,
+                        )
+                    await self._audit_repair_attempt(
+                        run_id=run_id,
+                        res=res,
+                        proposal=plan_result.proposal.model_dump() if (plan_result and plan_result.proposal) else {},
+                        candidate_definition=candidate_tool.model_dump() if candidate_tool else None,
+                        validation_status=val_result.status.value,
+                        validation_details=val_result.model_dump(),
                     )
+                    return res
 
                 # HTTP write succeeded downstream! Record separate business outcome.
                 business_effect_occurred = True
@@ -613,8 +738,8 @@ class RecoveryController:
 
                 if not verif_data.get("verified", False):
                     # Business write succeeded, but verification failed!
-                    # Do NOT rollback or report that the write was rolled back; record truthful outcomes.
-                    return RecoveryResult(
+                    failed_dur = round((time.perf_counter() - start_time) * 1000, 2)
+                    res = RecoveryResult(
                         status=RecoveryStatus.VERIFICATION_FAILED,
                         recovered=False,
                         tool_name=tool_name,
@@ -628,13 +753,25 @@ class RecoveryController:
                         execution_result=executed_res,
                         verification_details=verif_data,
                         termination_reason=f"Independent verification failed: {verif_data.get('reason')}",
-                        duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
+                        duration_ms=failed_dur,
+                        failed_recovery_duration_ms=failed_dur,
                         diagnosis_source=diagnosis_source,
                         diagnosis_tokens=diagnosis_tokens,
                         diagnosis_token_details=diagnosis_token_details,
                     )
+                    await self._audit_repair_attempt(
+                        run_id=run_id,
+                        res=res,
+                        proposal=plan_result.proposal.model_dump() if (plan_result and plan_result.proposal) else {},
+                        candidate_definition=candidate_tool.model_dump() if candidate_tool else None,
+                        validation_status=val_result.status.value,
+                        validation_details=val_result.model_dump(),
+                    )
+                    return res
 
                 verification_succeeded = True
+                verif_end_time = time.perf_counter()
+                recovery_duration_ms = round((verif_end_time - start_time) * 1000, 2)
 
                 # Emit recovery_verified event ONLY after actual verification
                 self._emit_event(
@@ -654,15 +791,17 @@ class RecoveryController:
                 # -------------------------------------------------------------
                 # 9. Atomic Registry Commit
                 # -------------------------------------------------------------
+                commit_start = time.perf_counter()
                 try:
                     committed_tool = await self.registry.commit_candidate(
                         candidate_id=staged_candidate_id,
                         expected_base_version=active_tool.version,
                     )
                     registry_committed = True
+                    commit_latency_ms = round((time.perf_counter() - commit_start) * 1000, 2)
                 except StaleVersionError as e:
-                    # Write succeeded and was verified, but registry commit encountered a concurrent stale conflict
-                    return RecoveryResult(
+                    commit_latency_ms = round((time.perf_counter() - commit_start) * 1000, 2)
+                    res = RecoveryResult(
                         status=RecoveryStatus.COMMIT_FAILED,
                         recovered=False,
                         tool_name=tool_name,
@@ -677,10 +816,21 @@ class RecoveryController:
                         verification_details=verif_data,
                         termination_reason=f"Atomic registry commit failed due to stale version conflict: {e}",
                         duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
+                        recovery_duration_ms=recovery_duration_ms,
+                        commit_latency_ms=commit_latency_ms,
                         diagnosis_source=diagnosis_source,
                         diagnosis_tokens=diagnosis_tokens,
                         diagnosis_token_details=diagnosis_token_details,
                     )
+                    await self._audit_repair_attempt(
+                        run_id=run_id,
+                        res=res,
+                        proposal=plan_result.proposal.model_dump() if (plan_result and plan_result.proposal) else {},
+                        candidate_definition=candidate_tool.model_dump() if candidate_tool else None,
+                        validation_status=val_result.status.value,
+                        validation_details=val_result.model_dump(),
+                    )
+                    return res
 
                 # Emit registry_committed event ONLY after actual commit
                 self._emit_event(
@@ -697,7 +847,8 @@ class RecoveryController:
                     },
                 )
 
-                return RecoveryResult(
+                total_duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+                res = RecoveryResult(
                     status=RecoveryStatus.RECOVERED,
                     recovered=True,
                     tool_name=tool_name,
@@ -712,11 +863,22 @@ class RecoveryController:
                     registry_committed=True,
                     execution_result=executed_res,
                     verification_details=verif_data,
-                    duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
+                    duration_ms=total_duration_ms,
+                    recovery_duration_ms=recovery_duration_ms,
+                    commit_latency_ms=commit_latency_ms,
                     diagnosis_source=diagnosis_source,
                     diagnosis_tokens=diagnosis_tokens,
                     diagnosis_token_details=diagnosis_token_details,
                 )
+                await self._audit_repair_attempt(
+                    run_id=run_id,
+                    res=res,
+                    proposal=plan_result.proposal.model_dump() if (plan_result and plan_result.proposal) else {},
+                    candidate_definition=candidate_tool.model_dump() if candidate_tool else None,
+                    validation_status=val_result.status.value,
+                    validation_details=val_result.model_dump(),
+                )
+                return res
 
             finally:
                 # Discard staged candidate if not committed

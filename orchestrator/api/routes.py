@@ -50,16 +50,19 @@ async def create_run(request: CreateRunRequest, req: Request):
     """Triggers an agent workflow run.
     - If execution_type == 'model_driven_baseline' or mode == 'baseline':
       Executes genuine LangChain tool-calling baseline agent against frozen v1 contracts.
+    - If execution_type == 'model_driven_healing':
+      Executes LLM-driven autonomous healing agent.
     - Otherwise:
       Executes deterministic normal workflow.
     """
     run_id = f"run-{uuid.uuid4().hex[:8]}"
     app_registry = getattr(req.app.state, "registry", None)
     app_client = getattr(req.app.state, "mock_client", None)
+    app_audit = getattr(req.app.state, "audit_store", None)
 
     if request.execution_type == "model_driven_baseline" or request.mode == "baseline":
         from orchestrator.agents.baseline import BaselineAgent
-        agent = BaselineAgent(client=app_client)
+        agent = BaselineAgent(client=app_client, audit_store=app_audit)
         result = await agent.execute_workflow(
             run_id=run_id,
             task=request.task,
@@ -68,7 +71,7 @@ async def create_run(request: CreateRunRequest, req: Request):
         workflow_manager._runs_store[run_id] = result
     elif request.execution_type == "model_driven_healing":
         from orchestrator.agents.healing import HealingAgent
-        agent = HealingAgent(registry=app_registry, client=app_client)
+        agent = HealingAgent(registry=app_registry, client=app_client, audit_store=app_audit)
         result = await agent.execute_workflow(
             run_id=run_id,
             task=request.task,
@@ -76,6 +79,8 @@ async def create_run(request: CreateRunRequest, req: Request):
         )
         workflow_manager._runs_store[run_id] = result
     else:
+        if app_audit:
+            workflow_manager.set_audit_store(app_audit)
         result = await workflow_manager.execute_workflow(
             run_id=run_id,
             mode=request.mode,
@@ -87,21 +92,56 @@ async def create_run(request: CreateRunRequest, req: Request):
 
 
 @router.get("/runs/{run_id}", response_model=RunSummaryResponse)
-async def get_run_status(run_id: str):
-    """Retrieves status and outcome of an execution run."""
+async def get_run_status(run_id: str, req: Request):
+    """Retrieves status and outcome of an execution run (in-memory or persistent SQLite audit)."""
     run = workflow_manager.get_run(run_id)
-    if not run:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Run '{run_id}' not found"
-        )
-    return RunSummaryResponse(**run)
+    if run:
+        return RunSummaryResponse(**run)
+
+    audit_store = getattr(req.app.state, "audit_store", None)
+    if audit_store:
+        persisted = await audit_store.get_run(run_id)
+        if persisted:
+            return RunSummaryResponse(
+                run_id=persisted.run_id,
+                status=persisted.status,
+                mode=persisted.mode,
+                task=persisted.task,
+                created_at=persisted.created_at,
+                completed_at=persisted.completed_at,
+                duration_ms=persisted.duration_ms,
+                outcome=persisted.verified_outcome,
+                error=persisted.error,
+                termination_reason=persisted.termination_reason,
+                execution_type=persisted.execution_type,
+            )
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Run '{run_id}' not found"
+    )
 
 
 @router.get("/runs/{run_id}/events")
 async def get_run_events_stream(run_id: str, request: Request):
     """Server-Sent Events (SSE) stream for real-time and historical run events."""
     existing_events = event_broadcaster.get_events(run_id)
+    if not existing_events:
+        audit_store = getattr(request.app.state, "audit_store", None)
+        if audit_store:
+            persisted_events = await audit_store.get_run_events(run_id)
+            existing_events = [
+                RunEvent(
+                    run_id=pe.run_id,
+                    sequence=pe.sequence,
+                    timestamp=pe.timestamp,
+                    mode=pe.mode,
+                    type=pe.event_type,
+                    tool=pe.tool,
+                    data=pe.data,
+                )
+                for pe in persisted_events
+            ]
 
     async def event_generator():
         listener_queue = event_broadcaster.register_listener(run_id)
@@ -112,7 +152,7 @@ async def get_run_events_stream(run_id: str, request: Request):
 
             # Check if run has already finished
             run_data = workflow_manager.get_run(run_id)
-            if run_data and run_data.get("status") in ["completed", "failed"]:
+            if run_data and run_data.get("status") in ["completed", "failed", "interrupted"]:
                 return
 
             # Listen for new events
@@ -154,19 +194,31 @@ async def get_registry(req: Request):
 
 
 @router.get("/patches")
-async def get_patches():
-    """Returns active and staged patches (empty in v1 scaffolding)."""
+async def get_patches(req: Request, limit: int = 50, offset: int = 0):
+    """Returns active and staged patches, alongside sanitized persistent repair history."""
+    audit_store = getattr(req.app.state, "audit_store", None)
+    repair_history: List[Dict[str, Any]] = []
+    if audit_store:
+        records = await audit_store.get_all_repair_attempts(limit=limit, offset=offset)
+        repair_history = [r.model_dump() for r in records]
+
     patches = healing_engine.get_patches()
     return {
         "status": "pending_member_2",
-        "notice": "Autonomous patch registry is pending Member 2 implementation.",
-        "active_patches": patches
+        "notice": "Autonomous patch history retrieved from SQLite audit store." if repair_history else "Autonomous patch registry is pending Member 2 implementation.",
+        "active_patches": patches,
+        "repair_history": repair_history,
+        "limit": limit,
+        "offset": offset,
+        "count": len(repair_history),
     }
 
 
 @router.post("/demo/reset")
 async def demo_reset():
-    """Resets both orchestrator run state and downstream mock API fixtures."""
+    """Resets both orchestrator runtime in-memory state and downstream mock API fixtures.
+    Preserves persistent SQLite audit history and metrics without dropping tables.
+    """
     workflow_manager.reset()
 
     # Forward reset to Mock API
@@ -183,7 +235,8 @@ async def demo_reset():
     return {
         "status": "reset_completed",
         "orchestrator": "state_cleared",
-        "mock_api": mock_status
+        "mock_api": mock_status,
+        "audit_store": "preserved"
     }
 
 
@@ -200,6 +253,12 @@ async def demo_mutation():
 
 
 @router.get("/metrics", response_model=SystemMetrics)
-async def get_metrics():
-    """Returns real measured system metrics without fabricated numbers."""
-    return metrics_tracker.get_metrics()
+async def get_metrics(
+    req: Request,
+    limit: int = 50,
+    offset: int = 0,
+    mode: Optional[str] = None
+):
+    """Returns real measured system metrics without fabricated numbers, including per-run metrics."""
+    audit_store = getattr(req.app.state, "audit_store", None)
+    return await metrics_tracker.get_metrics(store=audit_store, limit=limit, offset=offset, mode=mode)

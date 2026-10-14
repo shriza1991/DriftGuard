@@ -234,9 +234,50 @@
   - Targeted Test Suite (`tests/healing/test_llm_diagnosis.py`): 13 comprehensive unit tests covering deterministic skip (0 calls/tokens), natural-language rename, nesting, type conversion, missing-field refusal, forged quote rejection, prompt-injection defense, safety refusal/uncertain write skips, malformed/error/timeout termination, max one call per operation, session usage aggregation, frozen baseline immutability, and evidence packet bounding.
   - Full Regression Verification: All 124 backend tests passing cleanly.
 
-- [ ] **Task 10: Persistent Audit & Aggregate Metrics (`orchestrator/audit/`, `orchestrator/metrics/`)**:
-  - Persistent SQLite storage for audit entries and benchmark metrics.
-  - Token tracking and adaptation rate calculations.
+- [x] **Task 10: Persistent Audit & Aggregate Metrics (`orchestrator/audit/`, `orchestrator/metrics/`)**:
+  - Injectable SQLite Audit Store (`orchestrator/audit/store.py`, `orchestrator/audit/models.py`):
+    - Configurable database path with default `driftguard.sqlite3` (`settings.sqlite_db_path`).
+    - Threadpool worker execution (`asyncio.to_thread`) guaranteeing zero event-loop blocking.
+    - Idempotent relational DDL with explicit versioning (`schema_migrations`, Version 1).
+    - Parameterized SQL queries and atomic transaction contexts (`_transaction`).
+    - WAL journaling mode (`PRAGMA journal_mode = WAL;`) and bounded busy timeout (`5000ms`).
+    - Strict recursive secret redaction (`redact_secrets`) applied before any JSON serialization. Zero raw prompts, chain-of-thought, credentials, or mock admin mutation state stored.
+  - Linked Relational Records:
+    - `runs`: ID, mode, execution_type, task, status, termination_reason, created_at, completed_at, duration_ms, verified_outcome, error, audit_status.
+    - `tool_executions`: run_id, tool_call_id, tool_name, tool_version, fingerprint, attempt_number, is_repaired, sanitized arguments, status, result, failure, timing, operation_identity. Unique by `(run_id, tool_call_id, attempt_number)`.
+    - `repair_attempts`: run_id, tool_name, base_version, base_fingerprint, proposal_fingerprint, candidate_id, candidate_version, candidate_fingerprint, diagnosis_source, diagnosis_tokens, proposal, candidate_definition, validation_status, validation_details, recovery_status, business_effect_occurred, verification_succeeded, registry_committed, committed_version, termination_reason, recovery_duration_ms, commit_latency_ms, failed_recovery_duration_ms. Unique by `(run_id, tool_name, proposal_fingerprint)`.
+    - `events`: run_id, sequence, timestamp, mode, event_type, tool, data. Unique by `(run_id, sequence)`.
+    - `model_usages`: run_id, call_id, purpose, prompt_tokens, completion_tokens, total_tokens, is_complete. Unique by `(run_id, call_id, purpose)`.
+  - Truthful Persistence Failure Policies:
+    - Pre-write audit entry required before repaired mutating HTTP dispatch (`POST /tickets/assign`). If persistence fails, mutating dispatch is strictly blocked, `business_effect_occurred` remains `False`, and recovery terminates immediately with an audit failure reason.
+    - If persistence fails post-mutation (`business_effect_occurred = True`), marks `audit_status = 'incomplete'`. Available execution outcome and uncertainty are preserved without retrying the write or claiming rollback.
+  - Restart Recovery & Registry Isolation:
+    - On database initialization, nonterminal runs (`running`, `pending`) are updated to `status = 'interrupted'`, `termination_reason = 'system_interrupted_restart'`, and `audit_status = 'incomplete'`.
+    - Active tool registry remains strictly in-memory (`VersionedToolRegistry.create_default()`). Persisted repair definitions in SQLite are historical audit artifacts and are never automatically activated on restart.
+  - Truthful Per-Run & System Metrics (`orchestrator/metrics/run_metrics.py`, `orchestrator/metrics/tracker.py`):
+    - `RunMetrics`: Total duration, model turns, original vs. repaired tool dispatch counts, repair attempts, rejections, verified recoveries, and commits.
+    - Separated Timing: Monotonic clocks (`time.perf_counter()`) measure live elapsed durations. Recovery duration measures from first observed failure up to successful independent read verification (`get_ticket`). Commit latency is measured separately. Failed recovery durations are tracked separately as `failed_recovery_duration_ms` and never blended into successful recovery averages.
+    - Truthful Token Accounting: Real token counts are categorized as `complete`, `incomplete`, or `unavailable`. Incomplete counts preserve known subtotals without pretending to be complete. Session usage reconciles agent and diagnosis usage without double-counting.
+  - Demo Reset Isolation (`orchestrator/api/routes.py`):
+    - `POST /demo/reset` clears in-memory runs, listeners, metrics, and resets the tool registry to canonical v1. Persistent SQLite tables are strictly preserved; no destructive table-drop endpoint is exposed.
+  - Read Contracts & Pagination:
+    - `GET /runs/{run_id}`: Retrieves run summary from memory, falling back to SQLite audit store if server restarted.
+    - `GET /patches`: Returns active patches alongside sanitized repair history with `limit` and `offset`.
+    - `GET /metrics`: Returns system metrics alongside paginated `run_metrics` with `limit`, `offset`, and `mode` filtering.
+  - Targeted Test Suite (`tests/healing/test_audit_and_metrics.py`):
+    - 11 comprehensive unit tests verifying schema initialization/WAL, restart survival with interrupted run marking, repair outcome differentiation, duplicate hook avoidance, secret redaction, truthful token aggregation, pre-write audit blocking, post-write incomplete flagging, concurrent write preservation, demo reset history preservation, and read endpoint pagination.
+  - Full Regression Verification: All 135 backend tests in `tests/healing/` passing cleanly.
+
+---
+
+## 4. Next Tasks
+
+- [ ] **Task 11: Orchestrator Endpoints & SSE Integration (`orchestrator/api/`)**:
+  - Real-time and historical replay Server-Sent Events stream (`GET /runs/{run_id}/events`).
+  - Active tool registry management endpoints (`GET /registry`).
+  - Patch inspection endpoints (`GET /patches`).
+  - Live and historical system metrics endpoints (`GET /metrics`).
+  - Automated demo reset endpoint (`POST /demo/reset`) with Mock API coordination.
 
 ---
 
@@ -245,3 +286,7 @@
 2. Healing mode autonomously recovers from rename, type_change, and nesting within 1 retry.
 3. Second run reuses hot-committed patch immediately with zero diagnostic overhead.
 4. Negative drift scenarios trigger safe refusal without inventing values.
+5. Audit history survives restart and nonterminal runs are marked interrupted.
+6. Mutating writes are strictly blocked if pre-write audit fails.
+7. Post-write audit failure flags incomplete audit without retrying writes.
+8. Demo reset preserves persistent SQLite history while resetting runtime state.

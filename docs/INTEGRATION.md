@@ -761,6 +761,167 @@ When a run completes or fails, `model_usage` truthfully breaks down agent consum
 ```
 *Note: If no diagnosis model was called (deterministic success or ineligible failure), `diagnosis_tokens` is strictly `0` and `diagnosis_token_details` is `null`.*
 
+---
 
+## 13. Persistent Audit Records & Run Metrics (Member 2 Task 10)
 
+### 13.1 Injectable SQLite Audit Store Architecture
+Audit records and run metrics are backed by SQLite (`driftguard.sqlite3`) under `orchestrator/audit/`:
+- **Threadpool Async Execution**: All SQLite queries run in worker threads via `asyncio.to_thread` preventing event-loop stalls.
+- **WAL Mode & Busy Timeout**: Configured with `PRAGMA journal_mode = WAL;` and `PRAGMA busy_timeout = 5000;`.
+- **Idempotent Versioned Schema**: Initialized at startup via `schema_migrations` (Version 1).
+- **Restart Recovery**: Nonterminal runs (`running`, `pending`) are updated to `status = 'interrupted'`, `termination_reason = 'system_interrupted_restart'`, and `audit_status = 'incomplete'`. Archived patches in SQLite are **never** auto-activated on restart; the tool registry remains in-memory only.
+- **Demo Reset Isolation**: `POST /demo/reset` resets in-memory workflow runs, active tool registry, event listeners, and in-memory counters, while preserving all persistent SQLite audit tables.
 
+### 13.2 Truthful Persistence Failure Policies
+1. **Pre-Write Audit Failure**:
+   - Before executing a repaired mutating HTTP dispatch (`POST /tickets/assign`), the recovery controller writes a pre-write audit event.
+   - If persistence fails, the mutating dispatch is **strictly blocked**, `business_effect_occurred` remains `False`, and the run terminates with `status = 'execution_failed'`.
+2. **Post-Write Audit Failure**:
+   - If persistence fails after a mutating HTTP write has completed (`business_effect_occurred = True`), the store marks `audit_status = 'incomplete'`.
+   - The orchestrator preserves available execution outcome and write uncertainty without repeating mutating writes or claiming rollback.
+
+### 13.3 Timing & Token Accounting Standards
+- **Monotonic Clocks**: All elapsed live durations are computed with `time.perf_counter()`.
+- **Separated Recovery vs. Commit Latency**:
+  - `recovery_duration_ms`: Measures elapsed time from initial drift failure observation up to successful independent read verification (`get_ticket`).
+  - `commit_latency_ms`: Measures elapsed time to atomically stage and commit the validated patch to the in-memory tool registry.
+  - `failed_recovery_duration_ms`: Measures duration for failed or rejected attempts; never conflated with successful recovery latency.
+- **Truthful Token Accounting**:
+  - Model usage is categorized into `agent_token_usage`, `diagnosis_token_usage`, and `session_token_usage`.
+  - Missing/partial token counts are labeled `unavailable` or `incomplete` without fabricating totals. Known subtotals are preserved without presenting them as complete.
+
+### 13.4 Member 1 Handoff: Benchmark Fields & Aggregation Formulas
+Member 1 owns aggregate benchmarking and trial comparisons. The orchestrator provides per-run data via `GET /metrics`:
+- **Per-Run Records**: Available under `run_metrics` array with `mode`, `status`, `duration_ms`, `recovery_duration_ms`, `commit_latency_ms`, `failed_recovery_duration_ms`, `repair_attempts_count`, `repair_rejections_count`, `verified_recoveries_count`, `agent_token_usage`, `diagnosis_token_usage`, and `session_token_usage`.
+- **Adaptation Rate Calculation**:
+  $$\text{Adaptation Rate} = \frac{\text{verified\_recoveries\_count}}{\text{total\_healing\_trials}}$$
+  *(Denominator MUST include all healing trials, including validation-rejected and verification-failed trials).*
+- **Mean Time to Repair (MTTR)**:
+  $$\text{MTTR} = \frac{\sum \text{recovery\_duration\_ms}}{\text{verified\_recoveries\_count}}$$
+  *(Only include runs where `verification_succeeded == True`; failed recovery durations are excluded from MTTR and tracked as `failed_recovery_duration_ms`).*
+- **Token Efficiency / Savings**:
+  $$\text{Token Savings} = \text{Baseline Session Tokens} - \text{Healing Session Tokens (Run 2)}$$
+  *(Run 2 reuses hot-committed contracts with zero diagnosis tokens).*
+
+### 13.5 Member 3 Handoff: Read Endpoints & Pagination Payloads
+
+#### `GET /runs/{run_id}`
+Returns run summary from memory, falling back to SQLite audit store if server restarted:
+```json
+{
+  "run_id": "run-a1b2c3d4",
+  "status": "completed",
+  "mode": "healing",
+  "task": "Find Maya's user ID, assign ticket 81 to her, and confirm the updated assignee.",
+  "created_at": "2026-10-14T12:00:00.000Z",
+  "completed_at": "2026-10-14T12:00:02.150Z",
+  "duration_ms": 215.4,
+  "outcome": {
+    "ticket_id": 81,
+    "target_user_name": "Maya",
+    "resolved_user_id": "123",
+    "verified_assignee_id": "123",
+    "verified": true,
+    "status": "assigned"
+  },
+  "error": null,
+  "termination_reason": "completed",
+  "execution_type": "model_driven_healing"
+}
+```
+
+#### `GET /patches?limit=50&offset=0`
+Returns active patches alongside sanitized repair history:
+```json
+{
+  "status": "pending_member_2",
+  "notice": "Autonomous patch history retrieved from SQLite audit store.",
+  "active_patches": [],
+  "repair_history": [
+    {
+      "run_id": "run-a1b2c3d4",
+      "tool_name": "assign_ticket",
+      "base_version": "1.0.0",
+      "proposal_fingerprint": "fp_prop_123",
+      "candidate_version": "1.1.0",
+      "diagnosis_source": "deterministic",
+      "diagnosis_tokens": 0,
+      "validation_status": "passed",
+      "recovery_status": "recovered",
+      "business_effect_occurred": true,
+      "verification_succeeded": true,
+      "registry_committed": true,
+      "committed_version": "1.1.0",
+      "recovery_duration_ms": 42.5,
+      "commit_latency_ms": 1.2,
+      "failed_recovery_duration_ms": null
+    }
+  ],
+  "limit": 50,
+  "offset": 0,
+  "count": 1
+}
+```
+
+#### `GET /metrics?limit=50&offset=0&mode=healing`
+Returns system metrics alongside paginated per-run metrics:
+```json
+{
+  "total_runs": 10,
+  "normal_runs": 5,
+  "normal_success_count": 5,
+  "healing_trials": 5,
+  "verified_recoveries": 4,
+  "unsafe_trials": 0,
+  "average_recovery_time_ms": 45.2,
+  "token_usage": "measured",
+  "status": "normal_scaffolding_active",
+  "note": "Only real runs are counted; no synthetic benchmarks or fabricated recovery metrics are reported.",
+  "limit": 50,
+  "offset": 0,
+  "total_runs_count": 10,
+  "run_metrics": [
+    {
+      "run_id": "run-a1b2c3d4",
+      "mode": "healing",
+      "execution_type": "model_driven_healing",
+      "status": "completed",
+      "duration_ms": 250.0,
+      "total_turns": 3,
+      "tool_dispatch_count": 4,
+      "original_dispatch_count": 3,
+      "repaired_dispatch_count": 1,
+      "repair_attempts_count": 1,
+      "repair_rejections_count": 0,
+      "verified_recoveries_count": 1,
+      "registry_commits_count": 1,
+      "recovery_duration_ms": 42.5,
+      "commit_latency_ms": 1.2,
+      "failed_recovery_duration_ms": null,
+      "agent_token_usage": {
+        "input_tokens": 350,
+        "output_tokens": 70,
+        "total_tokens": 420,
+        "is_complete": true,
+        "status": "complete"
+      },
+      "diagnosis_token_usage": {
+        "input_tokens": 80,
+        "output_tokens": 20,
+        "total_tokens": 100,
+        "is_complete": true,
+        "status": "complete"
+      },
+      "session_token_usage": {
+        "input_tokens": 430,
+        "output_tokens": 90,
+        "total_tokens": 520,
+        "is_complete": true,
+        "status": "complete"
+      },
+      "audit_status": "complete"
+    }
+  ]
+}
+```

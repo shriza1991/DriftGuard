@@ -55,6 +55,7 @@ class HealingAgent:
         timeout_seconds: float = 30.0,
         approved_header_credentials: Optional[Dict[str, str]] = None,
         execution_guarantees: Optional[Dict[str, Any]] = None,
+        audit_store: Optional[Any] = None,
     ):
         self.registry = registry or VersionedToolRegistry.create_default()
         self._client = client
@@ -67,6 +68,7 @@ class HealingAgent:
             "X-DriftGuard-Key": "driftguard_internal",
         }
         self.execution_guarantees = execution_guarantees or {"pre_execution_rejection": True}
+        self.audit_store = audit_store
 
         # Initialize recovery controller with dependency injection
         executor = ToolExecutor(registry=self.registry, client=self._client)
@@ -82,7 +84,10 @@ class HealingAgent:
             approved_header_credentials=self.approved_header_credentials,
             execution_guarantees=self.execution_guarantees,
             llm_diagnoser=diagnoser,
+            audit_store=self.audit_store,
         )
+        if recovery_controller and getattr(recovery_controller, "audit_store", None) is None:
+            recovery_controller.audit_store = self.audit_store
 
     @property
     def event_broadcaster(self) -> EventBroadcaster:
@@ -158,6 +163,14 @@ class HealingAgent:
                 },
             },
         )
+        if self.audit_store:
+            await self.audit_store.record_run_start(
+                run_id=run_id,
+                mode="healing",
+                task=task,
+                execution_type="model_driven_healing",
+                created_at=start_wall,
+            )
 
         # 2. Resolve or configure ChatModel
         active_model = override_model or self._model
@@ -179,6 +192,14 @@ class HealingAgent:
                 run_record["duration_ms"] = duration_ms
                 run_record["error"] = err_msg
                 run_record["termination_reason"] = "model_configuration_error"
+                if self.audit_store:
+                    await self.audit_store.record_run_completed(
+                        run_id=run_id,
+                        status="failed",
+                        duration_ms=duration_ms,
+                        error=err_msg,
+                        termination_reason="model_configuration_error",
+                    )
                 return run_record
 
         # 3. Supply active registry definitions to the model
@@ -243,8 +264,28 @@ class HealingAgent:
                 out_tok = usage.get("output_tokens") or usage.get("completion_tokens") or 0
                 total_input_tokens += in_tok
                 total_output_tokens += out_tok
+                if self.audit_store:
+                    await self.audit_store.record_model_usage(
+                        run_id=run_id,
+                        call_id=f"turn-{turns_executed}",
+                        purpose="agent_turn",
+                        prompt_tokens=in_tok,
+                        completion_tokens=out_tok,
+                        total_tokens=in_tok + out_tok,
+                        is_complete=True,
+                    )
             else:
                 has_token_usage = False
+                if self.audit_store:
+                    await self.audit_store.record_model_usage(
+                        run_id=run_id,
+                        call_id=f"turn-{turns_executed}",
+                        purpose="agent_turn",
+                        prompt_tokens=None,
+                        completion_tokens=None,
+                        total_tokens=None,
+                        is_complete=False,
+                    )
 
             messages.append(ai_response)
 
@@ -335,6 +376,23 @@ class HealingAgent:
                     arguments=tool_args,
                     context=ctx,
                 )
+
+                if self.audit_store:
+                    await self.audit_store.record_tool_execution(
+                        run_id=run_id,
+                        tool_call_id=tool_call_id,
+                        tool_name=tool_name,
+                        tool_version=active_tool.version,
+                        fingerprint=active_tool.fingerprint or "",
+                        attempt_number=1,
+                        is_repaired=False,
+                        arguments=tool_args,
+                        status="success" if exec_result.is_success else "failed",
+                        result=exec_result.outcome or exec_result.result,
+                        failure=exec_result.failure.model_dump() if exec_result.failure else None,
+                        timing={"duration_ms": exec_result.duration_ms} if exec_result else None,
+                        operation_identity=exec_result.operation_identity.key if exec_result.operation_identity else None,
+                    )
 
                 if exec_result.is_success:
                     # Normal success on active tool
@@ -431,6 +489,23 @@ class HealingAgent:
                             "proposal_fingerprint": recovery_res.proposal_fingerprint,
                             "committed_version": recovery_res.committed_version,
                         })
+
+                        if self.audit_store and recovery_res.execution_result:
+                            await self.audit_store.record_tool_execution(
+                                run_id=run_id,
+                                tool_call_id=tool_call_id,
+                                tool_name=tool_name,
+                                tool_version=recovery_res.committed_version or active_tool.version,
+                                fingerprint=recovery_res.committed_fingerprint or "",
+                                attempt_number=2,
+                                is_repaired=True,
+                                arguments=tool_args,
+                                status="success",
+                                result=recovery_res.execution_result.outcome or recovery_res.execution_result.result,
+                                failure=None,
+                                timing={"duration_ms": recovery_res.execution_result.duration_ms} if recovery_res.execution_result else None,
+                                operation_identity=exec_result.operation_identity.key if exec_result.operation_identity else None,
+                            )
 
                         # Refresh model bindings from committed registry definitions before the next model invocation
                         current_active_tools = {t.name: t for t in self.registry.list_tools()}
@@ -562,5 +637,16 @@ class HealingAgent:
             outcome=final_outcome,
             error=run_record.get("error"),
         )
+
+        if self.audit_store:
+            await self.audit_store.record_run_completed(
+                run_id=run_id,
+                status=run_record["status"],
+                duration_ms=duration_ms,
+                verified_outcome=final_outcome,
+                error=run_record.get("error"),
+                termination_reason=termination_reason,
+                completed_at=run_record["completed_at"],
+            )
 
         return run_record

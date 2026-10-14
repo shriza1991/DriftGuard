@@ -37,10 +37,15 @@ class WorkflowExecutionManager:
         self,
         registry: Optional[VersionedToolRegistry] = None,
         client: Optional[MockBusinessApiClient] = None,
+        audit_store: Optional[Any] = None,
     ):
         self._registry = registry or VersionedToolRegistry.create_default()
         self._client = client
         self._runs_store: Dict[str, Dict[str, Any]] = {}
+        self.audit_store = audit_store
+
+    def set_audit_store(self, audit_store: Any) -> None:
+        self.audit_store = audit_store
 
     def get_registry(self) -> VersionedToolRegistry:
         return self._registry
@@ -95,6 +100,14 @@ class WorkflowExecutionManager:
             "error": None,
         }
         self._runs_store[run_id] = run_record
+        if self.audit_store:
+            await self.audit_store.record_run_start(
+                run_id=run_id,
+                mode=mode,
+                task=task,
+                execution_type="deterministic",
+                created_at=created_at,
+            )
 
         # 1. Publish run_started
         event_broadcaster.publish_event(
@@ -164,6 +177,22 @@ class WorkflowExecutionManager:
                     candidate_snapshot=find_tool if candidate_snapshot else None,
                 )
                 res_1 = await executor.execute("find_user", {"name": "Maya"}, context=ctx_1)
+                if self.audit_store:
+                    await self.audit_store.record_tool_execution(
+                        run_id=run_id,
+                        tool_call_id=call_id_1,
+                        tool_name="find_user",
+                        tool_version=find_tool.version if find_tool else "1.0.0",
+                        fingerprint=find_tool.fingerprint or "" if find_tool else "",
+                        attempt_number=1,
+                        is_repaired=False,
+                        arguments={"name": "Maya"},
+                        status="success" if res_1.is_success else "failed",
+                        result=res_1.outcome or res_1.result,
+                        failure=res_1.failure.model_dump() if res_1.failure else None,
+                        timing={"duration_ms": res_1.duration_ms} if res_1 else None,
+                        operation_identity=res_1.operation_identity.key if res_1.operation_identity else None,
+                    )
                 if not res_1.is_success:
                     status_code = res_1.http_status
                     err_code = res_1.failure.error_code if res_1.failure else "EXECUTION_ERROR"
@@ -309,6 +338,22 @@ class WorkflowExecutionManager:
                     candidate_snapshot=assign_tool if candidate_snapshot else None,
                 )
                 res_2 = await executor.execute("assign_ticket", assign_args, context=ctx_2)
+                if self.audit_store:
+                    await self.audit_store.record_tool_execution(
+                        run_id=run_id,
+                        tool_call_id=call_id_2,
+                        tool_name="assign_ticket",
+                        tool_version=assign_tool.version if assign_tool else "1.0.0",
+                        fingerprint=assign_tool.fingerprint or "" if assign_tool else "",
+                        attempt_number=1,
+                        is_repaired=False,
+                        arguments=assign_args,
+                        status="success" if res_2.is_success else "failed",
+                        result=res_2.outcome or res_2.result,
+                        failure=res_2.failure.model_dump() if res_2.failure else None,
+                        timing={"duration_ms": res_2.duration_ms} if res_2 else None,
+                        operation_identity=res_2.operation_identity.key if res_2.operation_identity else None,
+                    )
                 if not res_2.is_success:
                     status_code = res_2.http_status
                     err_code = res_2.failure.error_code if res_2.failure else "EXECUTION_ERROR"
@@ -345,6 +390,7 @@ class WorkflowExecutionManager:
                             event_broadcaster=event_broadcaster,
                             approved_header_credentials={"Authorization": "secops_auth"},
                             execution_guarantees={"pre_execution_rejection": True},
+                            audit_store=self.audit_store,
                         )
                         recovery_res = await rec_ctrl.recover_failure(
                             observation=res_2.failure_observation,
@@ -371,6 +417,16 @@ class WorkflowExecutionManager:
                             run_record["duration_ms"] = duration_ms
                             run_record["error"] = err_reason
                             metrics_tracker.record_run(mode=mode, success=False, duration_ms=duration_ms)
+                            if self.audit_store:
+                                await self.audit_store.record_run_completed(
+                                    run_id=run_id,
+                                    status="failed",
+                                    duration_ms=duration_ms,
+                                    verified_outcome=None,
+                                    error=err_reason,
+                                    termination_reason="step2_recovery_failed",
+                                    completed_at=run_record["completed_at"],
+                                )
                             return run_record
                     else:
                         event_broadcaster.publish_event(
@@ -389,6 +445,16 @@ class WorkflowExecutionManager:
                         run_record["duration_ms"] = duration_ms
                         run_record["error"] = err_msg
                         metrics_tracker.record_run(mode=mode, success=False, duration_ms=duration_ms)
+                        if self.audit_store:
+                            await self.audit_store.record_run_completed(
+                                run_id=run_id,
+                                status="failed",
+                                duration_ms=duration_ms,
+                                verified_outcome=None,
+                                error=err_msg,
+                                termination_reason="step2_normal_baseline_failed",
+                                completed_at=run_record["completed_at"],
+                            )
                         return run_record
 
             # -------------------------------------------------------------
@@ -426,6 +492,22 @@ class WorkflowExecutionManager:
                     candidate_snapshot=get_tool if candidate_snapshot else None,
                 )
                 res_3 = await executor.execute("get_ticket", {"ticket_id": target_ticket}, context=ctx_3)
+                if self.audit_store:
+                    await self.audit_store.record_tool_execution(
+                        run_id=run_id,
+                        tool_call_id=call_id_3,
+                        tool_name="get_ticket",
+                        tool_version=get_tool.version if get_tool else "1.0.0",
+                        fingerprint=get_tool.fingerprint or "" if get_tool else "",
+                        attempt_number=1,
+                        is_repaired=False,
+                        arguments={"ticket_id": target_ticket},
+                        status="success" if res_3.is_success else "failed",
+                        result=res_3.outcome or res_3.result,
+                        failure=res_3.failure.model_dump() if res_3.failure else None,
+                        timing={"duration_ms": res_3.duration_ms} if res_3 else None,
+                        operation_identity=res_3.operation_identity.key if res_3.operation_identity else None,
+                    )
                 if not res_3.is_success:
                     err_msg = res_3.failure.message if res_3.failure else "get_ticket verification call failed"
                     event_data_3 = {"status_code": res_3.http_status, "message": err_msg}
@@ -498,6 +580,16 @@ class WorkflowExecutionManager:
                 run_record["outcome"] = failed_outcome
                 run_record["error"] = mismatch_reason
                 metrics_tracker.record_run(mode=mode, success=False, duration_ms=duration_ms)
+                if self.audit_store:
+                    await self.audit_store.record_run_completed(
+                        run_id=run_id,
+                        status="failed",
+                        duration_ms=duration_ms,
+                        verified_outcome=failed_outcome,
+                        error=mismatch_reason,
+                        termination_reason="verification_failed",
+                        completed_at=run_record["completed_at"],
+                    )
                 return run_record
 
             # Verification Succeeded
@@ -526,6 +618,16 @@ class WorkflowExecutionManager:
 
             metrics_tracker.record_run(mode=mode, success=True, duration_ms=duration_ms)
             audit_logger.log(action="run_completed", actor="orchestrator", details=outcome)
+            if self.audit_store:
+                await self.audit_store.record_run_completed(
+                    run_id=run_id,
+                    status="completed",
+                    duration_ms=duration_ms,
+                    verified_outcome=outcome,
+                    error=None,
+                    termination_reason="completed",
+                    completed_at=run_record["completed_at"],
+                )
             return run_record
 
         except Exception as exc:
@@ -542,6 +644,16 @@ class WorkflowExecutionManager:
             run_record["duration_ms"] = duration_ms
             run_record["error"] = str(exc)
             metrics_tracker.record_run(mode=mode, success=False, duration_ms=duration_ms)
+            if self.audit_store:
+                await self.audit_store.record_run_completed(
+                    run_id=run_id,
+                    status="failed",
+                    duration_ms=duration_ms,
+                    verified_outcome=None,
+                    error=str(exc),
+                    termination_reason="exception",
+                    completed_at=run_record["completed_at"],
+                )
             return run_record
 
 

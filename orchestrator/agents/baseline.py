@@ -50,6 +50,7 @@ class BaselineAgent:
         max_turns: int = 5,
         max_tool_calls: int = 10,
         timeout_seconds: float = 30.0,
+        audit_store: Optional[Any] = None,
     ):
         self._client = client
         self._model = model
@@ -57,6 +58,7 @@ class BaselineAgent:
         self.max_tool_calls = max_tool_calls
         self.timeout_seconds = timeout_seconds
         self.catalogue = get_frozen_v1_catalogue()
+        self.audit_store = audit_store
 
     @property
     def event_broadcaster(self):
@@ -128,6 +130,14 @@ class BaselineAgent:
                 "execution_type": "model_driven_baseline",
             },
         )
+        if self.audit_store:
+            await self.audit_store.record_run_start(
+                run_id=run_id,
+                mode="normal",
+                task=task,
+                execution_type="model_driven_baseline",
+                created_at=start_wall,
+            )
 
         # 2. Initialize Model (lazy instantiation with explicit error on missing credentials)
         try:
@@ -148,6 +158,15 @@ class BaselineAgent:
                 tool=None,
                 data={"reason": str(mce), "duration_ms": duration_ms},
             )
+            if self.audit_store:
+                await self.audit_store.record_run_completed(
+                    run_id=run_id,
+                    status="failed",
+                    duration_ms=duration_ms,
+                    error=str(mce),
+                    termination_reason="configuration_error",
+                    completed_at=completed_wall,
+                )
             return run_record
 
         # 3. Conversation & Tool Execution Loop
@@ -210,8 +229,28 @@ class BaselineAgent:
                 out_tok = usage.get("output_tokens") or usage.get("completion_tokens") or 0
                 total_input_tokens += in_tok
                 total_output_tokens += out_tok
+                if self.audit_store:
+                    await self.audit_store.record_model_usage(
+                        run_id=run_id,
+                        call_id=f"turn-{turns_executed}",
+                        purpose="agent_turn",
+                        prompt_tokens=in_tok,
+                        completion_tokens=out_tok,
+                        total_tokens=in_tok + out_tok,
+                        is_complete=True,
+                    )
             else:
                 has_token_usage = False
+                if self.audit_store:
+                    await self.audit_store.record_model_usage(
+                        run_id=run_id,
+                        call_id=f"turn-{turns_executed}",
+                        purpose="agent_turn",
+                        prompt_tokens=None,
+                        completion_tokens=None,
+                        total_tokens=None,
+                        is_complete=False,
+                    )
 
             messages.append(ai_response)
 
@@ -305,6 +344,23 @@ class BaselineAgent:
                     context=ctx,
                     candidate_snapshot=frozen_tool,
                 )
+
+                if self.audit_store:
+                    await self.audit_store.record_tool_execution(
+                        run_id=run_id,
+                        tool_call_id=tool_call_id,
+                        tool_name=tool_name,
+                        tool_version=frozen_tool.version,
+                        fingerprint=frozen_tool.fingerprint or "",
+                        attempt_number=1,
+                        is_repaired=False,
+                        arguments=tool_args,
+                        status="success" if exec_result.is_success else "failed",
+                        result=exec_result.outcome or exec_result.result,
+                        failure=exec_result.failure.model_dump() if exec_result.failure else None,
+                        timing={"duration_ms": exec_result.duration_ms} if exec_result else None,
+                        operation_identity=exec_result.operation_identity.key if exec_result.operation_identity else None,
+                    )
 
                 if not exec_result.is_success:
                     err_payload = exec_result.failure.model_dump() if exec_result.failure else {"error": "Execution failed"}
@@ -526,5 +582,16 @@ class BaselineAgent:
             )
             metrics_tracker.record_run(mode="normal", success=False, duration_ms=duration_ms)
             audit_logger.log(action="baseline_failed", actor="baseline_agent", details=outcome)
+
+        if self.audit_store:
+            await self.audit_store.record_run_completed(
+                run_id=run_id,
+                status=run_record["status"],
+                duration_ms=duration_ms,
+                verified_outcome=outcome,
+                error=run_record.get("error"),
+                termination_reason=termination_reason,
+                completed_at=completed_wall,
+            )
 
         return run_record

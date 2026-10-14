@@ -5,12 +5,16 @@ from orchestrator.api.routes import router as orchestrator_router
 from orchestrator.config import settings
 from orchestrator.client.mock_client import MockBusinessApiClient
 from orchestrator.registry import VersionedToolRegistry
+from orchestrator.audit import SQLiteAuditStore
+from orchestrator.execution.events import event_broadcaster
+from orchestrator.metrics.tracker import metrics_tracker
+from orchestrator.execution.workflow import workflow_manager
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Orchestrator lifespan manager.
-    Initializes shared business client and tool registry on app state with finite timeouts.
+    Initializes shared business client, audit store, and tool registry on app state with finite timeouts.
     Does NOT require a live mock API or model provider call to complete startup.
     Ensures safe async cleanup on shutdown.
     """
@@ -18,6 +22,14 @@ async def lifespan(app: FastAPI):
         app.state.registry = VersionedToolRegistry.create_default()
     if not hasattr(app.state, "mock_client") or app.state.mock_client is None:
         app.state.mock_client = MockBusinessApiClient(base_url=settings.mock_api_url)
+    if not hasattr(app.state, "audit_store") or app.state.audit_store is None:
+        app.state.audit_store = SQLiteAuditStore(db_path=settings.sqlite_db_path)
+    
+    await app.state.audit_store.initialize()
+    event_broadcaster.set_audit_store(app.state.audit_store)
+    metrics_tracker.audit_store = app.state.audit_store
+    workflow_manager.set_audit_store(app.state.audit_store)
+
     yield
     if hasattr(app.state, "mock_client") and app.state.mock_client:
         await app.state.mock_client.aclose()
@@ -30,9 +42,13 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Initialize registry and client on app state for direct ASGI test clients
+# Initialize registry, client, and audit store on app state for direct ASGI test clients
 app.state.registry = VersionedToolRegistry.create_default()
 app.state.mock_client = MockBusinessApiClient(base_url=settings.mock_api_url)
+app.state.audit_store = SQLiteAuditStore(db_path=settings.sqlite_db_path)
+event_broadcaster.set_audit_store(app.state.audit_store)
+metrics_tracker.audit_store = app.state.audit_store
+workflow_manager.set_audit_store(app.state.audit_store)
 
 app.add_middleware(
     CORSMiddleware,

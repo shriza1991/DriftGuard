@@ -28,11 +28,15 @@ def redact_secrets(data: Any) -> Any:
 
 class EventBroadcaster:
     """In-memory event hub managing event history and real-time SSE listener queues."""
-    def __init__(self):
+    def __init__(self, audit_store: Optional[Any] = None):
         self._events_by_run: Dict[str, List[RunEvent]] = {}
         self._listeners_by_run: Dict[str, List[asyncio.Queue]] = {}
         self._schema: Optional[Dict[str, Any]] = None
+        self._audit_store = audit_store
         self._load_schema()
+
+    def set_audit_store(self, audit_store: Any):
+        self._audit_store = audit_store
 
     def _load_schema(self):
         schema_path = Path(__file__).resolve().parent.parent.parent / "contracts" / "events.schema.json"
@@ -85,6 +89,22 @@ class EventBroadcaster:
                     q.put_nowait(event)
                 except asyncio.QueueFull:
                     pass
+
+        # Persist event to audit store if available
+        if self._audit_store:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._audit_store.record_event(
+                    run_id=run_id,
+                    sequence=sequence,
+                    timestamp=now_iso,
+                    mode=mode,
+                    event_type=event_type,
+                    tool=tool,
+                    data=clean_data,
+                ))
+            except RuntimeError:
+                pass
 
         return event
 
