@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DriftGuardRunEvent",
+  "description": "Schema for DriftGuard run event stream emitted during baseline and healing workflows",
+  "type": "object",
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "description": "Unique identifier of the execution run"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Monotonically increasing sequence number within the run"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp of event creation"
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["normal", "healing"],
+      "description": "Execution mode of the agent"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "run_started",
+        "tool_call_started",
+        "tool_call_failed",
+        "diagnosis_started",
+        "patch_proposed",
+        "patch_validated",
+        "patch_rejected",
+        "retry_started",
+        "recovery_verified",
+        "registry_committed",
+        "run_completed",
+        "run_failed"
+      ],
+      "description": "Lifecycle event category"
+    },
+    "tool": {
+      "type": ["string", "null"],
+      "description": "Target tool name if event is scoped to a tool call, null otherwise"
+    },
+    "data": {
+      "type": "object",
+      "description": "Arbitrary event metadata. Secrets must be redacted prior to emission.",
+      "additionalProperties": true
+    }
+  },
+  "required": ["run_id", "sequence", "timestamp", "mode", "type", "tool", "data"],
+  "additionalProperties": false
+}

@@ -1,0 +1,7 @@
+{
+  "ticket_id": 81,
+  "status": "assigned",
+  "assignee_id": "123",
+  "updated_at": "2026-10-14T12:00:00Z",
+  "idempotent_replayed": false
+}
