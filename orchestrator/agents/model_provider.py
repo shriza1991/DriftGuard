@@ -1,6 +1,7 @@
 """Model provider integration for DriftGuard baseline agent.
 
-Supports single configured model provider through environment variables:
+Supports a single configured model provider through environment variables:
+- groq (ChatGroq with a tool-capable model)
 - google_genai (Gemini 2.5 Flash / 1.5 Flash via langchain_google_genai)
 - openai (GPT-4o / GPT-4o-mini via langchain_openai)
 
@@ -54,9 +55,9 @@ def create_chat_model(
     
     Args:
         override_model: Pre-instantiated ChatModel (e.g. for testing). If supplied, used directly.
-        provider: Provider identifier ('google_genai' / 'gemini' or 'openai'). Defaults to settings.model_provider.
+        provider: Provider identifier ('groq', 'google_genai' / 'gemini', or 'openai'). Defaults to settings.model_provider.
         model_name: Model name identifier. Defaults to settings.model_name.
-        api_key: Provider API key. Defaults to settings.model_api_key or standard env vars.
+        api_key: Explicit provider API key override. Groq otherwise uses GROQ_API_KEY only.
     """
     if override_model is not None:
         return override_model
@@ -64,7 +65,17 @@ def create_chat_model(
     target_provider = (provider or settings.model_provider).lower()
     target_model = model_name or settings.model_name
 
-    if target_provider in ["google_genai", "gemini"]:
+    if target_provider == "groq":
+        key = api_key or settings.groq_api_key or os.environ.get("GROQ_API_KEY")
+        if not key:
+            raise ModelConfigurationError("Missing Groq API key. Set GROQ_API_KEY in the backend environment.")
+        try:
+            from langchain_groq import ChatGroq
+        except ImportError as exc:
+            raise ModelConfigurationError("langchain_groq is not installed. Install the groq extra.") from exc
+        return ChatGroq(model=target_model, api_key=key, temperature=0.0)
+
+    elif target_provider in ["google_genai", "gemini"]:
         key = (
             api_key
             or settings.model_api_key
@@ -114,12 +125,12 @@ def create_chat_model(
     elif target_provider == "mock":
         raise ModelConfigurationError(
             "Model provider is set to 'mock' and no override_model was injected. "
-            "Configure a real provider (e.g. google_genai or openai) with API credentials, "
+            "Configure a real provider (e.g. groq) with API credentials, "
             "or inject an override_model for test execution."
         )
 
     else:
         raise ModelConfigurationError(
             f"Unsupported model provider '{target_provider}'. "
-            "Supported providers are 'google_genai' and 'openai'."
+            "Supported providers are 'groq', 'google_genai', and 'openai'."
         )

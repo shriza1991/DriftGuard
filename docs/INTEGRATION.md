@@ -1122,3 +1122,36 @@ Agent model-call exceptions now produce a short category (`authentication`, `per
 For Windows startup, from the repository root use a working Python 3.11 installation to create `.venv`, then `./.venv/Scripts/python.exe -m pip install -e ".[dev,gemini]"`. Keep the model key server-side under `ORCHESTRATOR_MODEL_API_KEY` or supported legacy `MODEL_API_KEY`; set `ORCHESTRATOR_MODEL_PROVIDER=gemini` and `ORCHESTRATOR_MODEL_NAME=gemini-2.5-flash` (or legacy `MODEL_NAME`). Start the mock with `./.venv/Scripts/python.exe -m uvicorn mock_api.app:app --host 127.0.0.1 --port 8001`, then restart the orchestrator with `./.venv/Scripts/python.exe -m uvicorn orchestrator.app:app --host 127.0.0.1 --port 8000`. For isolated ports use process-local `ORCHESTRATOR_MOCK_API_URL` and `ORCHESTRATOR_SQLITE_DB_PATH` as in the verification runs. The frontend never receives these credentials.
 
 `python -m compileall -q orchestrator tests/healing/test_model_provider_config.py` passed. `pytest -q tests/healing/test_model_provider_config.py` passed **4/4**. The broader fake-agent suite hung on its first existing scripted baseline test under the fresh latest-dependency environment and was interrupted; no broader pass is claimed. The real HTTP workflows above provide independent live evidence.
+
+## Groq provider migration and live verification — 14 October 2026
+
+Groq (not xAI/Grok) is now the configured model provider. The backend reads `GROQ_API_KEY` from its local `.env` through `OrchestratorSettings.groq_api_key`; the key is excluded from settings representation and is never a `VITE_` variable. The active model is configurable through `ORCHESTRATOR_MODEL_NAME`, with `openai/gpt-oss-120b` as the default. Existing Gemini/OpenAI adapters remain optional for compatibility; they are not fallback targets. Model-driven runs return a provider or configuration failure when Groq fails. The legacy `stub_agent.py` is unused metadata. The explicit `deterministic` run type remains separate and labelled in the frontend.
+
+The package was installed in the Python 3.11 `.venv` used to start the orchestrator: `langchain-groq==1.1.3` imported successfully. `pyproject.toml` declares the `groq` extra, `requirements.txt` includes it for the README install path, and `uv.lock` records the resolved set. Current [Groq model documentation](https://console.groq.com/docs/model/openai/gpt-oss-120b) lists this model as tool-capable; [Groq's tool-use table](https://console.groq.com/docs/tool-use/overview) confirms local tool calling. [LangChain's ChatGroq guide](https://docs.langchain.com/oss/python/integrations/chat/groq) documents the package and `GROQ_API_KEY`. These docs support the configuration choice; the following runs provide runtime evidence.
+
+In an isolated environment on mock port `18001`, orchestrator port `18000`, and a fresh ignored SQLite database:
+
+| Check | Observed result |
+| --- | --- |
+| Minimal provider request | `create_chat_model()` returned a nonempty real `READY` response; provider usage metadata was present. |
+| Structured tool call | `ChatGroq.bind_tools(get_langchain_tool_specs())` returned one structured `find_user` call with `name: Maya`. |
+| Normal task (`run-b806b679`) | Model-driven baseline completed. Recorded calls were `find_user`, `assign_ticket`, `get_ticket`; `GET /runs/{id}` reported resolved and verified assignee `123`, and independent mock `GET /tickets/81` also returned `123`. Session usage persisted as 1,907 tokens (1,721 input, 186 output). |
+| Rename healing (`run-df7b448b`) | With `rename` and `explicit_hint`, real Groq agent execution emitted `tool_call_failed`, `diagnosis_started`, `patch_proposed`, `patch_validated`, `retry_started`, `recovery_verified`, and `registry_committed`. `GET /registry` showed active `assign_ticket` version `1.1.0`; downstream verification was true and assignee `123`. Session usage was 1,898 tokens (1,680 input, 218 output). Diagnosis tokens were 0 because the explicit hint used deterministic diagnosis; this does **not** establish an LLM-authored patch. |
+| Registry reuse (`run-1e43fef4`) | Without reset, Groq supplied `assignee_id` in the `assign_ticket` tool call, matching the committed schema; the run completed with downstream verification true and no `diagnosis_started` event. Session usage was 1,961 tokens (1,740 input, 221 output). |
+| Provider failure (`run-8c2c5d27`) | A separate isolated orchestrator using an intentionally unavailable model returned `status: failed`, `termination_reason: model_invocation_error`, sanitized `model unavailable`, and only `run_started` / `run_failed`; no tool call or deterministic success was fabricated. |
+
+The prior Gemini section remains historical evidence. A completed baseline's `model_usage` disappears from `GET /runs/{id}` after reset when read from SQLite fallback, while `GET /metrics` retains authoritative per-run session usage; consumers should use the metrics record for historical token totals. This is a persistence/API limitation, not a zero-token run. No controlled paired comparison or ordinary-evidence LLM diagnosis is established by these tests.
+
+Windows startup from the repository root, after saving `GROQ_API_KEY` in the ignored backend `.env`:
+
+```powershell
+$env:UV_CACHE_DIR='.uv-cache'
+uv sync --extra groq --extra dev
+.\.venv\Scripts\python.exe -m uvicorn mock_api.app:app --host 127.0.0.1 --port 8001
+# In a second terminal, after restarting any previous orchestrator process:
+.\.venv\Scripts\python.exe -m uvicorn orchestrator.app:app --host 127.0.0.1 --port 8000
+```
+
+If an existing `.venv` has protected package metadata that prevents `uv sync`, install the declared adapter without removing unrelated packages using `uv pip install --python .venv\Scripts\python.exe 'langchain-groq>=1.1,<2'`, then run `.\.venv\Scripts\python.exe -m pip check`. Set `ORCHESTRATOR_MODEL_PROVIDER=groq` and `ORCHESTRATOR_MODEL_NAME=openai/gpt-oss-120b` in the backend `.env`; restart the orchestrator after any change. `/health` reports the selected provider but is not a connectivity test.
+
+Verification commands: `.\.venv\Scripts\python.exe -m pytest -q tests\healing\test_model_provider_config.py tests\healing\test_baseline_agent.py::test_missing_provider_config_fails_clearly` passed **8/8**; `.\.venv\Scripts\python.exe -m compileall -q orchestrator tests\healing\test_model_provider_config.py`, `uv lock --check --offline --python .venv\Scripts\python.exe`, `git diff --check`, and `pip check` passed (pip warned about an old invalid `pycparser` metadata directory but found no broken requirements). A targeted pre-existing ASGI recovery test selection produced no result after 30 seconds and was interrupted; it is unverified, not a pass. The isolated verification servers were stopped after testing. The actual Groq key was present only in the ignored local `.env`; it was absent from tracked diffs, changed files, and the isolated audit database.
