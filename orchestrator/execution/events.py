@@ -14,7 +14,10 @@ def redact_secrets(data: Any) -> Any:
         for k, v in data.items():
             k_lower = k.lower()
             if any(s in k_lower for s in ["auth", "token", "secret", "password", "key", "credential"]):
-                redacted[k] = "[REDACTED]"
+                if k_lower.endswith("_tokens") or k_lower in ("tokens", "token_usage") or k_lower.endswith("_token_count"):
+                    redacted[k] = redact_secrets(v)
+                else:
+                    redacted[k] = "[REDACTED]"
             else:
                 redacted[k] = redact_secrets(v)
         return redacted

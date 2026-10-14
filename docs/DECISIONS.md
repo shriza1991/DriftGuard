@@ -139,6 +139,29 @@
   2. The failure observation includes `validation_details["pre_execution_rejection"] = True`.
 - **Rationale**: Guarantees zero unverified writes on partially mutating endpoints, maintaining rock-solid retry safety.
 
+## ADR-026: LLM-Assisted Fallback Diagnosis with Untrusted API Evidence Isolation
+- **Context**: While machine-readable errors (e.g. `migration_mapping` objects) can be planned deterministically, downstream APIs frequently communicate contract changes via natural language error messages (e.g., `"Field user_id was renamed to assignee_id in v2 API"`). Unassisted regex heuristic parsing is brittle, but unchecked LLM generation risks prompt injection, hallucinated values, and credential theft.
+- **Decision**:
+  1. Deterministic planning is executed first; the LLM diagnoser is invoked **strictly** as a fallback when deterministic planning returns `insufficient_evidence` or `unsupported` on eligible `SCHEMA_DRIFT` failures.
+  2. The LLM is never invoked for non-eligible failures, uncertain writes, unverified status-only rejections, or exhausted operations.
+  3. API error text is treated strictly as untrusted data. Prompts clearly delimit quoted API error content from system instructions, explicitly prohibiting instruction following within errors.
+  4. The model has zero tool access, zero network browsing capability, and zero access to mock admin states or benchmark answers.
+  5. The evidence packet is bounded to 4000 characters with all credentials/secrets recursively redacted. If essential evidence exceeds the budget, diagnosis refuses rather than silently truncating.
+- **Rationale**: Enables robust interpretation of natural language drift evidence while preventing prompt-injection exploits and preserving strict security boundaries.
+
+## ADR-027: Strict Natural Language Evidence Grammar and Independent Validator Authorization
+- **Context**: If an LLM proposes argument renaming, nesting, or type conversion based on natural language error text, trusting the model's self-reported mapping or confidence introduces hallucinations (e.g. guessing that missing `assignee_id` corresponds to `user_id` without explicit correspondence evidence).
+- **Decision**:
+  1. The LLM must output structured JSON matching the established proposal format (`rename_argument`, `nest_argument`, `cast_type`, `set_header`) accompanied by verbatim `evidence_quote` and `evidence_path`.
+  2. Local diagnoser validation strictly rejects unknown fields, malformed paths, path traversal or `/admin` endpoints, and non-lossless conversions.
+  3. Model confidence or semantic similarity is **never** accepted as evidence.
+  4. The deterministic safety validator independently verifies the quoted natural language text against the original observation:
+     - Rename operations require explicit correspondence phrasing connecting source and target (e.g. `renamed to`, `deprecated ... use`, `use ... instead of`, `replaced by`, `->`). A missing-field error alone (e.g. `Missing required parameter: assignee_id`) strictly cannot authorize a rename.
+     - Nesting operations require explicit nesting markers (e.g. `nested under`, `moved under`, `sub-object`, `expected object`).
+     - Type conversions require explicit expected type evidence and must satisfy the lossless lexical invertibility allowlist.
+  5. At most ONE LLM diagnosis call and at most ONE repaired HTTP dispatch are permitted per logical operation.
+- **Rationale**: Enforces AGENTS.md Invariant 2: "Model proposes, deterministic validation authorizes."
+
 ---
 
 ## Technical Clarifications & Invariant Reminders
@@ -150,6 +173,8 @@
 > 3. HTTP 400/401/403/422 status codes alone **never** authorize write retries without an explicit trusted pre-execution rejection guarantee.
 > 4. Proposed repair candidates remain strictly `proposed_unvalidated` until validated by Task 7 and staged/committed by Task 8.
 > 5. Validated candidates are marked `status: "validated_not_committed"`. Validation is a point-in-time check; Task 8 re-verifies version freshness under the tool lock before recovery dispatch.
+> 6. LLM proposals have `source: "llm_assisted"` and are authorized through the identical deterministic safety validator as deterministic proposals. Neither source confers automatic authorization.
+
 
 
 

@@ -72,7 +72,9 @@ class RecoveryResult(BaseModel):
     verification_details: Optional[Dict[str, Any]] = None
     termination_reason: Optional[str] = None
     duration_ms: float = 0.0
+    diagnosis_source: str = "deterministic"
     diagnosis_tokens: int = 0
+    diagnosis_token_details: Optional[Dict[str, int]] = None
     staged_candidate_discarded: bool = False
 
 
@@ -158,6 +160,8 @@ class RecoveryController:
         approved_header_credentials: Optional[Dict[str, str]] = None,
         credential_resolver: Optional[Callable[[str], bool]] = None,
         execution_guarantees: Optional[Dict[str, Any]] = None,
+        llm_diagnoser: Optional[Any] = None,
+        diagnosis_timeout: float = 10.0,
     ):
         self.registry = registry
         self.executor = executor
@@ -168,9 +172,15 @@ class RecoveryController:
         self.approved_header_credentials = approved_header_credentials or {}
         self.credential_resolver = credential_resolver
         self.execution_guarantees = execution_guarantees or {}
+        self.llm_diagnoser = llm_diagnoser
+        self.diagnosis_timeout = diagnosis_timeout
 
         # Track attempted proposal fingerprints per logical operation to prevent repeated cycles
         self._attempted_proposals: Set[str] = set()
+        # Track operations that have undergone LLM diagnosis (max 1 LLM diagnosis per operation)
+        self._diagnosed_operations: Set[str] = set()
+        # Track operations that have had a repaired dispatch (max 1 repaired dispatch per operation)
+        self._dispatched_operations: Set[str] = set()
 
     def _emit_event(
         self,
@@ -227,6 +237,18 @@ class RecoveryController:
         # ---------------------------------------------------------------------
         # 1. Eligibility Check
         # ---------------------------------------------------------------------
+        op_key = operation_identity.key if operation_identity else f"{tool_name}:{base_fp}"
+        if op_key in self._dispatched_operations:
+            return RecoveryResult(
+                status=RecoveryStatus.PLANNING_FAILED,
+                recovered=False,
+                tool_name=tool_name,
+                base_version=base_version,
+                base_fingerprint=base_fp,
+                termination_reason=f"Operation '{op_key}' has already exhausted its single repaired dispatch budget; recovery loop already attempted.",
+                duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
+            )
+
         classification: ClassificationResult = (
             getattr(observation, "classification", None)
             or classify_failure(observation)
@@ -348,7 +370,7 @@ class RecoveryController:
                     )
 
                 # -------------------------------------------------------------
-                # 4. Pure Deterministic Proposal Formulation
+                # 4. Pure Deterministic Proposal Formulation (with bounded LLM fallback)
                 # -------------------------------------------------------------
                 plan_result: PlanningResult = self.planner(
                     snapshot=active_tool,
@@ -356,6 +378,51 @@ class RecoveryController:
                     classification=classification,
                     approved_header_credentials=self.approved_header_credentials,
                 )
+                diagnosis_source = "deterministic"
+                diagnosis_tokens = 0
+                diagnosis_token_details: Optional[Dict[str, int]] = None
+
+                # Fallback to LLM diagnoser if deterministic planning returned insufficient_evidence or unsupported
+                if (
+                    plan_result.status in (PlanningStatus.INSUFFICIENT_EVIDENCE, PlanningStatus.UNSUPPORTED)
+                    and self.llm_diagnoser is not None
+                    and classification.diagnosis_eligible
+                    and classification.category == SemanticFailureCategory.SCHEMA_DRIFT
+                    and not observation.uncertain_write
+                    and op_key not in self._diagnosed_operations
+                ):
+                    self._diagnosed_operations.add(op_key)
+                    rem_time = None
+                    if timeout_budget is not None:
+                        rem_time = max(0.0, timeout_budget - (time.perf_counter() - start_time))
+                    diag_budget = min(self.diagnosis_timeout, rem_time) if rem_time is not None else self.diagnosis_timeout
+
+                    if diag_budget > 0.05:
+                        llm_result: PlanningResult = await self.llm_diagnoser.diagnose(
+                            snapshot=active_tool,
+                            observation=observation,
+                            classification=classification,
+                            timeout_budget=diag_budget,
+                        )
+                        if llm_result.diagnosis_tokens:
+                            diagnosis_tokens = llm_result.diagnosis_tokens.get("total_tokens", 0)
+                            diagnosis_token_details = llm_result.diagnosis_tokens
+                        if llm_result.status == PlanningStatus.PROPOSED:
+                            plan_result = llm_result
+                            diagnosis_source = "llm_assisted"
+                        else:
+                            return RecoveryResult(
+                                status=RecoveryStatus.PLANNING_FAILED,
+                                recovered=False,
+                                tool_name=tool_name,
+                                base_version=active_tool.version,
+                                base_fingerprint=active_fp,
+                                termination_reason=f"LLM diagnosis could not formulate a safe proposal: {'; '.join(llm_result.reasons)}",
+                                duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
+                                diagnosis_source="llm_assisted",
+                                diagnosis_tokens=diagnosis_tokens,
+                                diagnosis_token_details=diagnosis_token_details,
+                            )
 
                 if plan_result.status != PlanningStatus.PROPOSED:
                     return RecoveryResult(
@@ -366,6 +433,9 @@ class RecoveryController:
                         base_fingerprint=active_fp,
                         termination_reason=f"Planner could not formulate a safe proposal: {'; '.join(plan_result.reasons)}",
                         duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
+                        diagnosis_source=diagnosis_source,
+                        diagnosis_tokens=diagnosis_tokens,
+                        diagnosis_token_details=diagnosis_token_details,
                     )
 
                 proposal_fp = plan_result.proposal_fingerprint
@@ -382,6 +452,9 @@ class RecoveryController:
                         proposal_fingerprint=proposal_fp,
                         termination_reason=f"Proposal fingerprint '{proposal_fp}' was already attempted for this operation identity. Recovery loop terminated.",
                         duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
+                        diagnosis_source=diagnosis_source,
+                        diagnosis_tokens=diagnosis_tokens,
+                        diagnosis_token_details=diagnosis_token_details,
                     )
                 self._attempted_proposals.add(attempt_key)
 
@@ -396,6 +469,8 @@ class RecoveryController:
                         "base_version": active_tool.version,
                         "proposal_fingerprint": proposal_fp,
                         "operations": [op.model_dump() for op in plan_result.operations],
+                        "source": diagnosis_source,
+                        "diagnosis_tokens": diagnosis_tokens,
                     },
                 )
 
@@ -432,6 +507,9 @@ class RecoveryController:
                         proposal_fingerprint=proposal_fp,
                         termination_reason=f"Validator rejected proposal: {'; '.join(val_result.rejection_reasons)}",
                         duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
+                        diagnosis_source=diagnosis_source,
+                        diagnosis_tokens=diagnosis_tokens,
+                        diagnosis_token_details=diagnosis_token_details,
                     )
 
                 # -------------------------------------------------------------
@@ -448,6 +526,8 @@ class RecoveryController:
                 # -------------------------------------------------------------
                 # 7. Single Repaired HTTP Execution
                 # -------------------------------------------------------------
+                self._dispatched_operations.add(op_key)
+
                 self._emit_event(
                     run_id=run_id,
                     mode=mode,
@@ -493,6 +573,9 @@ class RecoveryController:
                             execution_result=executed_res,
                             termination_reason=uncertain_reason,
                             duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
+                            diagnosis_source=diagnosis_source,
+                            diagnosis_tokens=diagnosis_tokens,
+                            diagnosis_token_details=diagnosis_token_details,
                         )
 
                     return RecoveryResult(
@@ -509,6 +592,9 @@ class RecoveryController:
                         execution_result=executed_res,
                         termination_reason=f"Repaired execution failed: {err_msg}",
                         duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
+                        diagnosis_source=diagnosis_source,
+                        diagnosis_tokens=diagnosis_tokens,
+                        diagnosis_token_details=diagnosis_token_details,
                     )
 
                 # HTTP write succeeded downstream! Record separate business outcome.
@@ -543,6 +629,9 @@ class RecoveryController:
                         verification_details=verif_data,
                         termination_reason=f"Independent verification failed: {verif_data.get('reason')}",
                         duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
+                        diagnosis_source=diagnosis_source,
+                        diagnosis_tokens=diagnosis_tokens,
+                        diagnosis_token_details=diagnosis_token_details,
                     )
 
                 verification_succeeded = True
@@ -588,6 +677,9 @@ class RecoveryController:
                         verification_details=verif_data,
                         termination_reason=f"Atomic registry commit failed due to stale version conflict: {e}",
                         duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
+                        diagnosis_source=diagnosis_source,
+                        diagnosis_tokens=diagnosis_tokens,
+                        diagnosis_token_details=diagnosis_token_details,
                     )
 
                 # Emit registry_committed event ONLY after actual commit
@@ -621,7 +713,9 @@ class RecoveryController:
                     execution_result=executed_res,
                     verification_details=verif_data,
                     duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
-                    diagnosis_tokens=0,
+                    diagnosis_source=diagnosis_source,
+                    diagnosis_tokens=diagnosis_tokens,
+                    diagnosis_token_details=diagnosis_token_details,
                 )
 
             finally:

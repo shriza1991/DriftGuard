@@ -205,8 +205,8 @@ def plan_repair(
                     if s and t:
                         explicit_migrations[str(s)] = str(t)
 
-    # Structured machine-readable hint parsing
-    combined_hint = (hint_text + " " + msg_text).strip()
+    # Structured machine-readable hint parsing (details.hint, migration_hint)
+    combined_hint = hint_text.strip()
     if combined_hint:
         # Pattern A: "Field 'user_id' is deprecated. Expected 'assignee_id'."
         p_dep = re.search(r"['\"]?(\w+)['\"]?\s+is\s+deprecated\.\s*Expected\s+['\"]?([\w.]+)['\"]?", combined_hint, re.IGNORECASE)

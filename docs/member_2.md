@@ -207,9 +207,32 @@
   - Targeted Test Suite (`tests/healing/test_recovery.py`): 14 comprehensive unit tests verifying rename, nesting, type conversion, approved header, status-only rejection blocking, uncertain write prevention, single retry bound, verification mismatch handling, staged candidate cleanup, loop prevention, stale recovery skips, model binding refresh, frozen baseline preservation, and truthful contract-compliant events.
   - Full Regression Verification: All 119 backend tests passing cleanly.
 
-- [ ] **Task 9: LLM-Assisted Diagnosis (`orchestrator/healing/llm_diagnosis.py`)**:
-  - Integrate LLM fallback for ambiguous failures where deterministic heuristic returns insufficient evidence.
-  - Authorize proposed patches strictly through deterministic `SafetyValidator`.
+- [x] **Task 9: LLM-Assisted Diagnosis (`orchestrator/healing/llm_diagnosis.py`, `orchestrator/healing/validator.py`, `orchestrator/healing/recovery.py`, `orchestrator/agents/healing.py`)**:
+  - Deterministic-First Gating: Pure deterministic planning executes first; LLM diagnoser is invoked strictly when deterministic planning returns `insufficient_evidence` or `unsupported` on eligible `SCHEMA_DRIFT` failures with pre-execution rejection guarantees. Zero LLM calls on deterministic success.
+  - Minimal Sanitized Evidence Packet:
+    - Bounded to 4000 characters maximum (`MAX_EVIDENCE_PACKET_CHARS = 4000`); diagnosis safely refuses with `insufficient_evidence` if essential evidence exceeds the budget.
+    - Strictly sanitized: sensitive auth headers, tokens, and credentials recursively redacted; zero out-of-band mock admin state, internal mutations, or benchmark answers exposed.
+  - Untrusted API Text Defense & Prompt Isolation:
+    - Delimited prompt boundary explicitly separating system role instructions from quoted error text.
+    - Explicit anti-injection system prompt preventing instruction overrides or redirection.
+    - Zero tool access, network browsing, or arbitrary code execution capabilities provided to the diagnoser model.
+  - Strictly Validated Structured Output:
+    - Enforces JSON output schema (`LLMDiagnosisResponse`, `LLMOperationProposal`) matching canonical `PlanningResult` operations: `rename_argument`, `nest_argument`, `cast_type`, `set_header`.
+    - Local diagnoser validation: validates verbatim quotes within error text, valid schema source fields, prohibited admin/path injections, lossless cast constraints, and approved headers.
+  - Independent Deterministic Validator Verification:
+    - Model confidence and semantic similarity are never accepted as proof.
+    - Validator independently inspects the failure observation for explicit natural-language correspondence markers (`renamed to`, `deprecated ... use`, `nested under`, `moved under`).
+    - Missing-field errors alone (e.g. `Missing required parameter: assignee_id`) strictly cannot authorize a rename.
+  - Bounded Execution & Resource Limits:
+    - Configurable diagnosis timeout (`diagnosis_timeout = 10.0s`) counted against remaining workflow deadline.
+    - Exactly ONE LLM diagnosis call per logical operation; zero recursive re-prompt or error-correction loops.
+    - Exactly ONE repaired HTTP dispatch budget per operation identity; exhausted operations cannot be reopened by subsequent proposals.
+  - Truthful Usage Accounting & Events:
+    - Real provider-reported diagnosis tokens (`input_tokens`, `output_tokens`, `total_tokens`) extracted and aggregated cleanly.
+    - Run record `model_usage` truthfully breaks down agent consumption vs. diagnosis consumption.
+    - Emits contract-compatible `patch_proposed` events with `source: "llm_assisted"` and `diagnosis_tokens`.
+  - Targeted Test Suite (`tests/healing/test_llm_diagnosis.py`): 13 comprehensive unit tests covering deterministic skip (0 calls/tokens), natural-language rename, nesting, type conversion, missing-field refusal, forged quote rejection, prompt-injection defense, safety refusal/uncertain write skips, malformed/error/timeout termination, max one call per operation, session usage aggregation, frozen baseline immutability, and evidence packet bounding.
+  - Full Regression Verification: All 124 backend tests passing cleanly.
 
 - [ ] **Task 10: Persistent Audit & Aggregate Metrics (`orchestrator/audit/`, `orchestrator/metrics/`)**:
   - Persistent SQLite storage for audit entries and benchmark metrics.

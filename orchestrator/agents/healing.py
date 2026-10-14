@@ -36,6 +36,7 @@ from orchestrator.execution.events import event_broadcaster, EventBroadcaster
 from orchestrator.agents.catalogue import get_langchain_tool_specs
 from orchestrator.agents.model_provider import create_chat_model, ModelConfigurationError
 from orchestrator.healing.recovery import RecoveryController, RecoveryResult, RecoveryStatus
+from orchestrator.healing.llm_diagnosis import LLMDiagnoser
 from orchestrator.metrics.tracker import metrics_tracker
 from orchestrator.audit.logger import audit_logger
 
@@ -69,12 +70,18 @@ class HealingAgent:
 
         # Initialize recovery controller with dependency injection
         executor = ToolExecutor(registry=self.registry, client=self._client)
+        diagnoser = (
+            LLMDiagnoser(model=self._model, approved_header_credentials=self.approved_header_credentials)
+            if self._model is not None
+            else None
+        )
         self.recovery_controller = recovery_controller or RecoveryController(
             registry=self.registry,
             executor=executor,
             event_broadcaster=event_broadcaster,
             approved_header_credentials=self.approved_header_credentials,
             execution_guarantees=self.execution_guarantees,
+            llm_diagnoser=diagnoser,
         )
 
     @property
@@ -192,11 +199,17 @@ class HealingAgent:
             HumanMessage(content=task),
         ]
 
+        # Ensure recovery controller has active diagnoser model if active_model resolved
+        if self.recovery_controller.llm_diagnoser is not None and self.recovery_controller.llm_diagnoser.model is None:
+            self.recovery_controller.llm_diagnoser.model = active_model
+
         turns_executed = 0
         total_tool_calls_executed = 0
         total_input_tokens = 0
         total_output_tokens = 0
         has_token_usage = True
+        total_diagnosis_tokens = 0
+        diagnosis_tokens_details: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         recorded_tool_calls: List[Dict[str, Any]] = []
         recovered_tool_calls: List[Dict[str, Any]] = []
         termination_reason: Optional[str] = None
@@ -382,6 +395,13 @@ class HealingAgent:
                             mode="healing",
                         )
 
+                    if recovery_res is not None and recovery_res.diagnosis_tokens > 0:
+                        total_diagnosis_tokens += recovery_res.diagnosis_tokens
+                        if recovery_res.diagnosis_token_details:
+                            diagnosis_tokens_details["input_tokens"] += recovery_res.diagnosis_token_details.get("input_tokens", 0)
+                            diagnosis_tokens_details["output_tokens"] += recovery_res.diagnosis_token_details.get("output_tokens", 0)
+                            diagnosis_tokens_details["total_tokens"] += recovery_res.diagnosis_token_details.get("total_tokens", 0)
+
                     if recovery_res is not None and recovery_res.recovered and recovery_res.execution_result:
                         # Recovery successful!
                         # Return recovered result paired with original model tool_call_id
@@ -403,6 +423,8 @@ class HealingAgent:
                             "status": "recovered",
                             "result": redact_secrets(recovered_payload),
                             "committed_version": recovery_res.committed_version,
+                            "diagnosis_source": recovery_res.diagnosis_source,
+                            "diagnosis_tokens": recovery_res.diagnosis_tokens,
                         })
                         recovered_tool_calls.append({
                             "tool_name": tool_name,
@@ -426,6 +448,8 @@ class HealingAgent:
                         if recovery_res:
                             err_dict["recovery_status"] = recovery_res.status.value
                             err_dict["recovery_termination"] = recovery_res.termination_reason
+                            err_dict["diagnosis_source"] = recovery_res.diagnosis_source
+                            err_dict["diagnosis_tokens"] = recovery_res.diagnosis_tokens
                         recorded_tool_calls.append({
                             "tool_call_id": tool_call_id,
                             "tool_name": tool_name,
@@ -459,10 +483,12 @@ class HealingAgent:
         token_usage_dict: Optional[Dict[str, Any]] = None
         if has_token_usage:
             token_usage_dict = {
-                "prompt_tokens": total_input_tokens,
-                "completion_tokens": total_output_tokens,
-                "total_tokens": total_input_tokens + total_output_tokens,
-                "diagnosis_tokens": 0,
+                "prompt_tokens": total_input_tokens + diagnosis_tokens_details["input_tokens"],
+                "completion_tokens": total_output_tokens + diagnosis_tokens_details["output_tokens"],
+                "total_tokens": total_input_tokens + total_output_tokens + total_diagnosis_tokens,
+                "agent_tokens": total_input_tokens + total_output_tokens,
+                "diagnosis_tokens": total_diagnosis_tokens,
+                "diagnosis_token_details": diagnosis_tokens_details if total_diagnosis_tokens > 0 else None,
             }
 
         # Determine Final Workflow Success

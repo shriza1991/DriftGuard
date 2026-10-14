@@ -33,6 +33,81 @@ from orchestrator.models.validation import (
 )
 
 
+def _is_supported_natural_language_rename(text: str, source: str, target: str) -> bool:
+    """Independently verifies that natural language text establishes an explicit rename correspondence.
+    
+    Rules:
+    - Both source and target must be present in the text.
+    - A missing field alone (e.g. 'Field assignee_id is missing') NEVER establishes a rename.
+    - Must match an explicit supported correspondence pattern:
+      - 'renamed to', 'renamed as', 'was renamed', 'rename ... to'
+      - 'deprecated ... use ... instead', 'deprecated ... expected'
+      - 'use ... instead of', 'instead of'
+      - 'replaced by', 'replaces'
+      - 'migrated to', 'migrated as'
+      - '->' (e.g. 'source -> target')
+    - Unsupported paraphrases or ambiguity cause rejection.
+    """
+    if not isinstance(text, str) or not source or not target:
+        return False
+    t_lower = text.lower()
+    s_lower = source.lower()
+    tgt_lower = target.lower()
+
+    if s_lower not in t_lower or tgt_lower not in t_lower:
+        return False
+
+    patterns = [
+        r"renamed\s+(?:to|as)",
+        r"was\s+renamed",
+        r"rename\s+.*?to",
+        r"deprecated.*?use",
+        r"deprecated.*?expected",
+        r"instead\s+of",
+        r"use\s+.*?instead",
+        r"replaced\s+by",
+        r"replaces\s+",
+        r"migrated\s+(?:to|as)",
+        r"->",
+    ]
+    for pat in patterns:
+        if re.search(pat, t_lower):
+            return True
+    return False
+
+
+def _is_supported_natural_language_nest(text: str, source: str, target: str) -> bool:
+    """Independently verifies that natural language text establishes an explicit nesting relationship."""
+    if not isinstance(text, str) or not source or not target:
+        return False
+    t_lower = text.lower()
+    s_lower = source.lower()
+    tgt_lower = target.lower()
+
+    parts = tgt_lower.split(".")
+    target_parent = parts[0] if parts else ""
+    target_leaf = parts[-1] if parts else ""
+
+    if s_lower not in t_lower:
+        return False
+    if tgt_lower not in t_lower and (target_parent not in t_lower or target_leaf not in t_lower):
+        return False
+
+    nest_patterns = [
+        r"nested\s+(?:under|inside|in)",
+        r"moved\s+under",
+        r"now\s+under",
+        r"now\s+nested",
+        r"sub-object",
+        r"expected\s+object",
+        r"enclosed\s+in",
+    ]
+    for pat in nest_patterns:
+        if re.search(pat, t_lower):
+            return True
+    return False
+
+
 def _resolve_evidence_path(observation: FailureObservation, path_str: str) -> Any:
     """Traverses observation fields to resolve an evidence path reference."""
     if not path_str:
@@ -52,6 +127,10 @@ def _resolve_evidence_path(observation: FailureObservation, path_str: str) -> An
         if norm_path.startswith(prefix):
             norm_path = norm_path[len(prefix):]
 
+    if norm_path in ("raw_error_message", "error_message", "message"):
+        if observation.raw_error_message:
+            return observation.raw_error_message
+
     # Clean leading 'error.' or 'details.'
     path_variants = [norm_path]
     if norm_path.startswith("error."):
@@ -62,7 +141,7 @@ def _resolve_evidence_path(observation: FailureObservation, path_str: str) -> An
         path_variants.append(norm_path[len("error.details."):])
 
     # If asking for migration_hint or migration_mapping, add fallback variant
-    if "migration_hint" in norm_path:
+    if "migration_hint" in norm_path or "hint" in norm_path:
         path_variants.append(norm_path.replace("migration_hint", "migration_mapping"))
         path_variants.append("migration_mapping")
         path_variants.append("hint")
@@ -97,6 +176,11 @@ def _resolve_evidence_path(observation: FailureObservation, path_str: str) -> An
                     break
             if found and curr is not None:
                 return curr
+
+    if norm_path in ("hint", "migration_hint"):
+        h = body.get("hint") or (body.get("error", {}).get("hint") if isinstance(body.get("error"), dict) else None)
+        if h:
+            return h
 
     if in_list:
         return observation.validation_details or body or {}
@@ -313,8 +397,7 @@ def validate_repair_proposal(
                     if ev_val.get(op.source_path) == op.target_path or (ev_val.get("source") == op.source_path and ev_val.get("target") == op.target_path):
                         has_semantic_rename = True
                 elif isinstance(ev_val, str):
-                    if op.source_path in ev_val and op.target_path in ev_val and any(kw in ev_val.lower() for kw in ["renamed", "deprecated", "expected", "instead of", "replaced", "migrated"]):
-                        has_semantic_rename = True
+                    has_semantic_rename = _is_supported_natural_language_rename(ev_val, op.source_path, op.target_path)
 
                 if not has_semantic_rename:
                     reason = f"Evidence at '{ev_path}' does not semantically support renaming '{op.source_path}' to '{op.target_path}'."
@@ -329,8 +412,7 @@ def validate_repair_proposal(
                     if ev_val.get(op.source_path) == op.target_path or (ev_val.get("source") == op.source_path and ev_val.get("target") == op.target_path):
                         has_semantic_nest = True
                 elif isinstance(ev_val, str):
-                    if op.source_path in ev_val and op.target_path in ev_val and any(kw in ev_val.lower() for kw in ["nested", "migrated", "expected", "object"]):
-                        has_semantic_nest = True
+                    has_semantic_nest = _is_supported_natural_language_nest(ev_val, op.source_path, op.target_path)
 
                 if not has_semantic_nest:
                     reason = f"Evidence at '{ev_path}' does not semantically support nesting '{op.source_path}' into '{op.target_path}'."

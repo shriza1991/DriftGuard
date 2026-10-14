@@ -648,5 +648,119 @@ Event schemas for recovery execution, verification, and commit emitted over `/ru
 }
 ```
 
+---
+
+## 12. LLM-Assisted Diagnosis Integration (Member 2 Task 9)
+
+### 12.1 Diagnosis Gating & Flow
+Deterministic planning runs first. The LLM diagnoser is invoked **only** when deterministic planning yields `insufficient_evidence` or `unsupported` on eligible `SCHEMA_DRIFT` failures with pre-execution rejection guarantees.
+
+```mermaid
+graph TD
+    Fail[FailureObservation] --> Classify[Classify Failure]
+    Classify --> DetPlan[Deterministic Planner]
+    DetPlan -->|Proposed| Validate[Deterministic Safety Validator]
+    DetPlan -->|Insufficient Evidence / Unsupported| CheckEligible{Eligible Schema Drift?}
+    CheckEligible -->|No / Uncertain Write / Exhausted| TerminateFail[Terminate Failure]
+    CheckEligible -->|Yes| SanitizedPrompt[Sanitized Evidence Packet]
+    SanitizedPrompt --> LLM[LLM Diagnosis Call]
+    LLM --> LocalVal[Local Schema & Path Validation]
+    LocalVal -->|Invalid / Disallowed Op| TerminateFail
+    LocalVal --> Validate
+    Validate -->|Accepted| Stage[Stage Candidate]
+    Validate -->|Rejected| TerminateFail
+    Stage --> Retry[Single Repaired HTTP Execution]
+```
+
+### 12.2 Handoff for Member 1 (Mock API Error Phrasing)
+
+#### Supported Natural-Language Error Patterns
+The deterministic safety validator independently verifies the following natural-language evidence patterns when quoting error responses:
+
+1. **Argument Renaming (`rename_argument`)**:
+   - Requires explicit correspondence connecting source argument and target wire key.
+   - **Supported Examples**:
+     - `"Field user_id was renamed to assignee_id in v2 API."`
+     - `"user_id is deprecated, please use assignee_id instead."`
+     - `"Parameter user_id replaced by assignee_id."`
+     - `"user_id -> assignee_id"`
+   - **Refused Pattern**: `"Missing required parameter: assignee_id"` alone (without mentioning `user_id` or correspondence) **cannot** authorize a rename.
+
+2. **Argument Nesting (`nest_argument`)**:
+   - Requires explicit nesting indicator connecting source argument to parent object.
+   - **Supported Examples**:
+     - `"user_id is now nested under target.id in request body."`
+     - `"Expected parameter user_id moved under target.id object."`
+     - `"Expected field 'target' object with nested id, received user_id."`
+   - **Refused Pattern**: Ambiguous phrases or missing parent field paths.
+
+3. **Lossless Type Conversion (`cast_type`)**:
+   - Requires explicit type requirement in error message plus lexical invertibility of the caller's value.
+   - **Supported Examples**:
+     - `"Validation error: user_id must be of type integer, received string."`
+     - `"Expected integer for user_id, received string '123'"`
+   - **Refused Pattern**: Non-numeric strings (`"Maya"`), float truncations (`"12.34"`), boolean-as-int (`True`), or leading-zero strings (`"0123"`).
+
+4. **Required Headers (`set_header`)**:
+   - Requires explicit header requirement; must match approved header configuration.
+   - **Supported Examples**:
+     - `"Missing required header: X-DriftGuard-Key"`
+     - `"Required header 'Authorization' is missing"`
+   - **Refused Pattern**: Unapproved or custom headers not in the orchestrator's approved credential reference mapping.
+
+### 12.3 Handoff for Member 3 (Frontend & SSE Events)
+
+#### Patch Proposal Event with Diagnosis Source & Token Accounting
+When a patch is proposed (either via deterministic heuristic or LLM diagnosis), the event carries `source` and `diagnosis_tokens`:
+
+```json
+{
+  "run_id": "run-b8f2c19a",
+  "sequence": 4,
+  "timestamp": "2026-10-14T12:00:01.200Z",
+  "mode": "healing",
+  "type": "patch_proposed",
+  "tool": "assign_ticket",
+  "data": {
+    "tool": "assign_ticket",
+    "base_version": "1.0.0",
+    "target_version": "1.1.0",
+    "fingerprint": "b4f2c8d19a02ec71",
+    "operations": [
+      {
+        "type": "rename_argument",
+        "source": "user_id",
+        "target": "assignee_id"
+      }
+    ],
+    "explanation": "Field user_id was renamed to assignee_id in v2 API.",
+    "source": "llm_assisted",
+    "diagnosis_tokens": 150
+  }
+}
+```
+
+#### Run Record `model_usage` Breakdown
+When a run completes or fails, `model_usage` truthfully breaks down agent consumption vs. diagnosis consumption:
+
+```json
+{
+  "model_usage": {
+    "prompt_tokens": 450,
+    "completion_tokens": 110,
+    "total_tokens": 710,
+    "agent_tokens": 560,
+    "diagnosis_tokens": 150,
+    "diagnosis_token_details": {
+      "input_tokens": 110,
+      "output_tokens": 40,
+      "total_tokens": 150
+    }
+  }
+}
+```
+*Note: If no diagnosis model was called (deterministic success or ineligible failure), `diagnosis_tokens` is strictly `0` and `diagnosis_token_details` is `null`.*
+
+
 
 
