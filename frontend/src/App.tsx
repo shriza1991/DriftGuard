@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { BenchmarkView, DemoView, RegistryAuditView, SampleLabel, type DataSource, type ExecutionScope } from './components/DashboardViews';
 import { DEFAULT_TASK, FIXTURES, fixtureEvents, type MutationId } from './fixtures/scenarios';
-import { api } from './services/api';
+import { api, ApiError } from './services/api';
 import { RunEventStream, type StreamStatus } from './services/eventStream';
 import { CommandGate } from './state/commandGate';
-import { mergeEvents } from './state/runState';
+import { mergeEvents, runOutcome } from './state/runState';
 import type { CreateRunRequest, RepairAttempt, RunEvent, RunSummary, SystemMetrics, ToolRegistryEntry } from './types';
 
 type Tab = 'demo' | 'registry' | 'benchmark';
@@ -29,6 +29,9 @@ export default function App() {
   const [patchHasMore, setPatchHasMore] = useState(false);
   const [patchOffset, setPatchOffset] = useState(0);
   const [metrics, setMetrics] = useState<SystemMetrics | null>(null);
+  const [metricsLoading, setMetricsLoading] = useState(false);
+  const [metricsError, setMetricsError] = useState<string | null>(null);
+  const [sampleHistory, setSampleHistory] = useState<{ scenario: string; baseline: string; healing: string }[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [streamWarning, setStreamWarning] = useState<string | null>(null);
@@ -56,10 +59,12 @@ export default function App() {
     if (source !== 'live') return;
     let cancelled = false;
     setPatchLoading(true);
+    setMetricsLoading(true); setMetricsError(null);
     Promise.allSettled([api.fetchRegistry(), api.fetchMetrics(), api.fetchPatches()]).then(([registry, systemMetrics, history]) => {
       if (cancelled) return;
       if (registry.status === 'fulfilled') setTools(registry.value.tools); else setTools([]);
-      if (systemMetrics.status === 'fulfilled') setMetrics(systemMetrics.value);
+      if (systemMetrics.status === 'fulfilled') { setMetrics(systemMetrics.value); setMetricsError(null); }
+      else { setMetrics(null); setMetricsError(systemMetrics.reason instanceof Error ? systemMetrics.reason.message : 'Metrics response unavailable.'); }
       if (history.status === 'fulfilled') {
         setPatches(history.value.repair_history);
         setPatchHasMore(history.value.count === history.value.limit);
@@ -67,6 +72,7 @@ export default function App() {
         setPatchError(history.value.invalid_count ? `${history.value.invalid_count} incomplete patch records were omitted.` : null);
       } else { setPatches([]); setPatchHasMore(false); setPatchOffset(0); setPatchError(history.reason instanceof Error ? history.reason.message : 'Patch history unavailable.'); }
       setPatchLoading(false);
+      setMetricsLoading(false);
       if (registry.status === 'rejected' || systemMetrics.status === 'rejected')
         setError('Cannot load live registry or metrics. Check the orchestrator connection or response format.');
     });
@@ -90,14 +96,14 @@ export default function App() {
   };
 
   const changeSource = (next: DataSource) => {
-    if (next === source) return;
+    if (next === source || gateRef.current.locked) return;
     clearView();
     setSource(next);
     setMutation(next === 'live' ? 'none' : 'rename');
     setAppliedMutation(null);
     setTools([]);
     setPatches([]); setPatchError(null); setPatchHasMore(false); setPatchOffset(0); setPatchLoading(false);
-    setMetrics(null);
+    setMetrics(null); setMetricsError(null); setMetricsLoading(false);
   };
 
   const playSample = (nextScope: Exclude<ExecutionScope, null>) => {
@@ -113,6 +119,7 @@ export default function App() {
       if (position >= length) {
         if (timerRef.current !== null) window.clearInterval(timerRef.current);
         timerRef.current = null;
+        if (nextScope === 'comparison') setSampleHistory((previous) => [{ scenario: FIXTURES[mutation]?.title ?? mutation, baseline: runOutcome(baseline), healing: runOutcome(healing) }, ...previous].slice(0, 10));
         gateRef.current.release();
         setBusy(false);
       }
@@ -121,10 +128,12 @@ export default function App() {
 
   const refreshData = async (generation: number) => {
     setPatchLoading(true);
+    setMetricsLoading(true); setMetricsError(null);
     const [registry, systemMetrics, history] = await Promise.allSettled([api.fetchRegistry(), api.fetchMetrics(), api.fetchPatches()]);
     if (generation !== generationRef.current) return;
     if (registry.status === 'fulfilled') setTools(registry.value.tools); else setTools([]);
-    if (systemMetrics.status === 'fulfilled') setMetrics(systemMetrics.value);
+    if (systemMetrics.status === 'fulfilled') { setMetrics(systemMetrics.value); setMetricsError(null); }
+    else { setMetrics(null); setMetricsError(systemMetrics.reason instanceof Error ? systemMetrics.reason.message : 'Metrics response unavailable.'); }
     if (history.status === 'fulfilled') {
       setPatches(history.value.repair_history);
       setPatchHasMore(history.value.count === history.value.limit);
@@ -132,6 +141,7 @@ export default function App() {
       setPatchError(history.value.invalid_count ? `${history.value.invalid_count} incomplete patch records were omitted.` : null);
     } else { setPatches([]); setPatchHasMore(false); setPatchOffset(0); setPatchError(history.reason instanceof Error ? history.reason.message : 'Patch history unavailable.'); }
     setPatchLoading(false);
+    setMetricsLoading(false);
     if (registry.status === 'rejected' || systemMetrics.status === 'rejected')
       setStreamWarning('Live registry or metrics could not be refreshed.');
   };
@@ -192,7 +202,12 @@ export default function App() {
           }
           if (!terminalReceived) setStreamWarning('Final status loaded, but event replay did not reach a complete terminal sequence. Timeline may be incomplete.');
         } catch (reason) {
-          if (generation === generationRef.current) setError(reason instanceof Error ? `Final run lookup failed: ${reason.message}` : 'Final run lookup failed.');
+          closeRun = false;
+          finishing = false;
+          if (generation === generationRef.current) {
+            setStreamWarning(reason instanceof Error ? `Final run lookup failed: ${reason.message}. Retrying authoritative status.` : 'Final run lookup failed. Retrying authoritative status.');
+            pollRef.current = window.setInterval(() => { void checkStatus(); }, 1000);
+          }
         } finally {
           if (generation === generationRef.current && closeRun) {
             streamRef.current?.close(); streamRef.current = null;
@@ -232,8 +247,10 @@ export default function App() {
     } catch (reason) {
       if (generation !== generationRef.current) return;
       streamRef.current?.close(); streamRef.current = null;
+      const definitelyRejected = reason instanceof ApiError && reason.status !== null && reason.status >= 400 && reason.status < 500;
       setError(reason instanceof Error ? reason.message : 'The backend run could not start.');
-      gateRef.current.release(); setBusy(false);
+      if (definitelyRejected) { gateRef.current.release(); setBusy(false); }
+      else setCommandStatus('Run start outcome is unknown. Controls remain locked because the backend may still be executing. Reload only after confirming the backend is idle.');
       setStreamStatus('disconnected');
     }
   };
@@ -291,12 +308,12 @@ export default function App() {
     <div className="source-bar"><div className="source-inner"><SampleLabel source={source} /><span>{source === 'sample' ? 'Fixture demonstration' : 'Orchestrator data · single runs'}</span></div></div>
     <header className="dashboard-header"><div className="header-inner"><div className="brand"><div className="brand-mark">D<span>G</span></div><div><strong>DriftGuard</strong><small>Adaptive tool registry</small></div></div>
       <nav className="top-nav" aria-label="Dashboard tabs"><button className={tab === 'demo' ? 'active' : ''} onClick={() => setTab('demo')}>Demo</button><button className={tab === 'registry' ? 'active' : ''} onClick={() => setTab('registry')}>Registry & Audit</button><button className={tab === 'benchmark' ? 'active' : ''} onClick={() => setTab('benchmark')}>Benchmark</button></nav>
-      <div className="source-switch" aria-label="Data source"><button className={source === 'sample' ? 'active' : ''} onClick={() => changeSource('sample')}>Sample</button><button className={source === 'live' ? 'active' : ''} onClick={() => changeSource('live')}>Live</button></div>
+      <div className="source-switch" aria-label="Data source"><button className={source === 'sample' ? 'active' : ''} onClick={() => changeSource('sample')} disabled={busy}>Sample</button><button className={source === 'live' ? 'active' : ''} onClick={() => changeSource('live')} disabled={busy}>Live</button></div>
     </div></header>
     <main className="dashboard-main">
       {tab === 'demo' && <DemoView source={source} task={task} mutation={mutation} appliedMutation={appliedMutation} busy={busy} error={error} streamWarning={streamWarning} streamStatus={streamStatus} commandStatus={commandStatus} baselineEvents={baselineEvents} healingEvents={healingEvents} scope={scope} baselineSummary={baselineSummary} healingSummary={healingSummary} patches={patches} tools={tools} patchError={patchError} patchLoading={patchLoading} onTask={handleTaskChange} onMutation={handleMutationChange} onRun={handleRun} onReset={() => { void handleReset(); }} onApplyMutation={() => { void handleApplyMutation(); }} />}
       {tab === 'registry' && <RegistryAuditView source={source} tools={tools} events={visibleEvents} mutation={mutation} error={error} patches={patches} patchError={patchError} patchLoading={patchLoading} patchHasMore={patchHasMore} currentRunId={currentRunId} onLoadMore={() => { void loadMorePatches(); }} />}
-      {tab === 'benchmark' && <BenchmarkView source={source} metrics={metrics} mutation={mutation} baselineEvents={baselineEvents} healingEvents={healingEvents} error={error} />}
+      {tab === 'benchmark' && <BenchmarkView source={source} metrics={metrics} metricsLoading={metricsLoading} metricsError={metricsError} currentRunId={currentRunId} baselineEvents={baselineEvents} healingEvents={healingEvents} sampleHistory={sampleHistory} />}
     </main>
     <footer className="dashboard-footer"><span>DriftGuard / GENESIS 2.0</span><span>Evidence before commitment · independent verification</span></footer>
   </div>;

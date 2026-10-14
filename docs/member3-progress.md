@@ -232,3 +232,42 @@ Phase 2 remains **IMPLEMENTED — LIVE VERIFICATION BLOCKED**. This phase implem
 4. Provide a live environment or permitted local HTTP path for frontend-to-orchestrator verification. The existing socket restriction still blocks Phase 2 and Phase 3 end-to-end evidence.
 
 **Phase 3 status: PARTIAL.** The frontend view implementation, build, and state/client tests pass. Live registry, patch lifecycle, and second-task reuse remain unverified because local HTTP is inaccessible. Phase 4 has not started.
+
+---
+
+## Phase 4 — authoritative metrics, safeguards, and presentation (14 October 2026)
+
+### Gate and contract evidence
+
+Phase 2 is still **IMPLEMENTED — LIVE VERIFICATION BLOCKED** and Phase 3 remains **PARTIAL**. No live end-to-end evidence was obtained in Phase 4. Rechecked `orchestrator/api/routes.py`, `orchestrator/metrics/{tracker,run_metrics}.py`, `evaluation/{runner,reporting,scenarios}.py`, `contracts/api-contracts.md`, `docs/{INTEGRATION,DECISIONS,member_3}.md`, and the current frontend source/tests. The markdown metrics contract remains a minimal example and does not describe the route's pagination or per-run fields.
+
+Actual `GET /metrics` returns operational counters, nullable `average_recovery_time_ms`, `limit`, `offset`, `total_runs_count`, and a page of `run_metrics`. Run metrics include measured recovery/commit/failure durations and agent, diagnosis, and session token breakdowns with completeness status. The backend mean is calculated from verified repair records with non-null durations. Its timing sample count is not returned. Aggregate run and repair scans each cap at 1,000, and their scopes differ. `unsafe_trials` is hard-coded zero. The endpoint does **not** expose evaluated recoverable-trial denominator, safe refusals, failed recoveries, benchmark median/p95, or aggregate token comparisons. `evaluation/runner.py` computes those for a controlled evaluation, but no orchestrator route publishes its result. The UI therefore does not derive an adaptation rate from incompatible operational counts or treat `unsafe_trials:0` as a measured safety result.
+
+### Frontend changes
+
+- `frontend/src/types/index.ts`, `state/metricsState.ts`, and `services/api.ts` model and validate the actual metrics response. Invalid responses fail visibly; missing or incomplete token usage is unavailable. A complete measured zero remains zero.
+- `components/MetricsView.tsx` separates unavailable controlled benchmark measures, operational counters, and selected-run measurements. It shows the backend mean in milliseconds with the timed sample count marked unavailable. The numerator/denominator for adaptation are both unavailable until a controlled benchmark result is published. Median, p95, aggregate verified successes, safe refusals, and failed recoveries remain unavailable. Current-run diagnosis/session tokens and backend recovery duration use only the matching run ID. Baseline and ordinary-success token observations name their own runs and do not become a paired comparison or cross-run total.
+- `App.tsx` tracks metrics loading and errors separately, discards stale metrics on failed refresh, and refreshes registry, patches, and metrics after completed runs and reset. A final `GET /runs/{id}` failure now keeps the command lock and retries status rather than releasing controls. A transport drop alone does not unlock a run. Source switching is disabled and guarded during commands. An ambiguous run-start network/server failure keeps controls locked because no run identifier is available for reconciliation; an explicit 4xx rejection releases them.
+- Reset uses the real endpoint, clears the selected-run view after confirmed downstream reset, and refetches persisted data. The UI explains that backend audit/metrics history remains. Completed **sample** comparisons are kept as clearly labelled illustrations after Reset view; none become benchmark measurements. Scenario intent labels distinguish recoverable drift from deliberately unsafe changes without claiming an observed outcome.
+- Demo run IDs are shortened with full values in expandable details. Keyboard focus styles, metric-card contrast, and responsive grid breakpoints were added for narrow and laptop-sized layouts. Status colours retain text labels.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| `npm run build` | Passed TypeScript and Vite production build; only existing Vite/plugin deprecation notices. |
+| `node --experimental-transform-types --test tests/fixture-state.test.ts tests/live-stream.test.ts tests/patch-state.test.ts tests/metrics-state.test.ts` | Passed **23/23**. New tests check response shape, matching-run selection, nullable timing, incomplete usage, and complete zero. Existing tests cover fixture terminal outcomes, safe refusal, event dedup/replay, switching, and synchronous command gating. |
+| `git diff --check` | Passed; Git reported only line-ending conversion warnings. |
+| Dev server | `npm run dev -- --host 127.0.0.1` failed with `EPERM` while Vite removed `node_modules/.vite/deps`. No files were deleted manually. |
+| Browser/layout inspection | Production preview started at `127.0.0.1:4173`, but browser navigation timed out and `Invoke-WebRequest` reported socket access forbidden. Laptop/narrow CSS breakpoints were inspected statically; rendered layouts could not be confirmed. |
+| Live metrics, reset, and busy controls | Not exercised over HTTP because local sockets are blocked. State logic and parser are implemented, but real backend behaviour remains unverified. |
+| Lint | No lint script or config exists in `frontend/package.json`; no lint pass is claimed. |
+
+### Remaining backend dependencies for Member 2
+
+1. Publish a controlled evaluation result with explicit recoverable-trial numerator/denominator, unsafe-trial/safe-refusal and failed-recovery counts, matching filters, timing sample count, median and p95 only when meaningful, and complete baseline/healing/ordinary-success token scopes. Keep operational `/metrics` counters distinct from benchmark trials.
+2. Provide a recoverable command identity or status lookup for an ambiguous `POST /runs` network/server failure. The frontend cannot safely unlock controls when the request may have been accepted but returned no run ID.
+3. Document the actual `/metrics` pagination, cap, units, nullable/`unavailable` fields, and run token completeness in `contracts/api-contracts.md` after coordination. Clarify whether the operational mean can be accompanied by its measured duration sample count.
+4. Provide a permitted local/browser HTTP path for real reset, metrics, SSE, and layout verification. A controlled paired comparison endpoint/protocol remains absent, so the live comparison gate is still blocked.
+
+**Phase 4 status: IMPLEMENTED — LIVE AND VISUAL VERIFICATION BLOCKED.** Production build and focused state tests pass. Metrics that the backend does not publish remain unavailable, and no fixture outcome is presented as live or measured benchmark evidence. Phase 5 has not started.

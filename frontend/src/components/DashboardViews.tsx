@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import type { RepairAttempt, RunEvent, RunSummary, SystemMetrics, ToolRegistryEntry } from '../types';
+import type { RepairAttempt, RunEvent, RunSummary, ToolRegistryEntry } from '../types';
 import { DEFAULT_TASK, FIXTURES, MUTATIONS, SAMPLE_REGISTRY, type MutationId } from '../fixtures/scenarios';
 import { candidateState, eventTone, mergeEvents, runOutcome, safeDisplay, safeText, type RunOutcome } from '../state/runState';
 import { summaryOutcome } from '../state/runState';
@@ -14,6 +14,8 @@ const outcomeLabels: Record<RunOutcome, string> = {
   idle: 'Not run', running: 'In progress', verified: 'Verified task completion',
   completed_unverified: 'Completed · verification unavailable', failed: 'Failed', safe_refusal: 'Safe refusal',
 };
+const shortId = (id: string) => id.length > 18 ? `${id.slice(0, 8)}…${id.slice(-6)}` : id;
+function DisplayId({ id }: { id: string }) { return <details className="display-id"><summary>{shortId(id)}</summary><code>{id}</code></details>; }
 
 function Pill({ tone, children }: { tone: 'blue' | 'amber' | 'green' | 'red' | 'muted'; children: ReactNode }) {
   return <span className={`pill pill-${tone}`}>{children}</span>;
@@ -46,10 +48,10 @@ function RunCard({ side, events, selected, source, summary }: { side: 'baseline'
     <p className="run-card-description">{isNormal ? 'Backend deterministic execution with an independent assignee read.' : side === 'baseline' ? 'Original v1 request, with no contract adaptation.' : 'Evidence → candidate → validation → independent verification → commit.'}</p>
     {!selected && <div className="empty-inline">Select {side === 'baseline' ? 'Run baseline' : 'Run healing'} or Compare both to populate this lane.</div>}
     {selected && events.length === 0 && <div className="empty-inline">Waiting for {source === 'sample' ? 'sample playback' : 'backend events'}…</div>}
-    {selected && summary && <div className="run-card-keyline"><span>Run ID</span><code>{summary.run_id}</code></div>}
+    {selected && summary && <div className="run-card-keyline"><span>Run ID</span><DisplayId id={summary.run_id} /></div>}
     {selected && summary && <div className="run-card-keyline"><span>Authoritative status</span><strong>{summary.status}</strong></div>}
     {selected && events.length > 0 && <>
-      <div className="run-card-keyline"><span>Run</span><code>{events[0].run_id}</code></div>
+      {!summary && <div className="run-card-keyline"><span>Run</span><DisplayId id={events[0].run_id} /></div>}
       <div className="run-card-keyline"><span>Events received</span><strong>{events.length}</strong></div>
       <div className="latest-event"><span className="eyebrow">Latest event</span><strong>{typeof latest?.data.summary === 'string' ? safeText(latest.data.summary) : latest?.type.replace(/_/g, ' ')}</strong></div>
       {summary?.error && <p className="inline-error">{safeText(summary.error)}</p>}
@@ -128,9 +130,11 @@ export function DemoView(props: DemoProps) {
     <section className="panel controls-panel"><div className="section-heading"><div><span className="eyebrow">Demo controls</span><h2>Run the assignment workflow</h2></div><SampleLabel source={props.source} /></div>
       <div className="control-fields"><label>Agent task<input value={props.task} onChange={(event) => props.onTask(event.target.value)} disabled={props.busy} placeholder={DEFAULT_TASK} /></label><label>Drift scenario<select value={props.mutation} onChange={(event) => props.onMutation(event.target.value as MutationId)} disabled={props.busy}>{MUTATIONS.map((mutation) => <option value={mutation.id} key={mutation.id}>{mutation.label}</option>)}</select></label></div>
       {props.source === 'live' && <p className="notice-line">Reset or apply the selected scenario before a run. The backend has no paired comparison operation; baseline and healing cannot be claimed as a controlled comparison.</p>}
+      <p className="quiet-copy">{props.source === 'live' ? 'Reset restores the downstream demo and active registry, clears this selected run, and preserves persisted audit and metrics history. Reset is disabled while an operation may be active.' : 'Reset clears the current sample playback. Completed sample comparisons remain in the Benchmark tab history.'}</p>
       {unavailable && <p className="notice-line">No frontend sample exists for this scenario. Choose None, Rename, Combined, or Missing business value.</p>}
       {taskUnsupported && <p className="notice-line">Samples cover only the prefilled Maya → ticket 81 task. Restore that text to run a sample.</p>}
       {scenario && props.source === 'sample' && <p className="scenario-description"><strong>{scenario.title}.</strong> {scenario.description}</p>}
+      <p className="scenario-description"><strong>Scenario intent:</strong> {props.mutation === 'none' ? 'ordinary success without drift' : ['missing_business_value', 'unavailable_credential', 'ambiguous_mapping'].includes(props.mutation) ? 'deliberately unsafe change; safe refusal expected' : 'recoverable contract drift'}. This is a scenario classification, not a measured result.</p>
       <div className="action-row">{props.source === 'live' && <button className="button button-secondary" onClick={() => props.onRun('normal')} disabled={runDisabled}>Run normal</button>}<button className="button button-secondary" onClick={() => props.onRun('baseline')} disabled={runDisabled}>Run baseline</button><button className="button button-secondary" onClick={() => props.onRun('healing')} disabled={runDisabled}>Run healing</button><button className="button button-primary" onClick={() => props.onRun('comparison')} disabled={runDisabled || props.source === 'live'}>Compare both <span aria-hidden="true">↗</span></button>{props.source === 'live' && <button className="button button-secondary" onClick={props.onApplyMutation} disabled={props.busy}>Apply mutation</button>}<button className="button button-ghost" onClick={props.onReset} disabled={props.busy}>{props.source === 'live' ? 'Reset backend' : 'Reset view'}</button></div>
       {props.source === 'live' && <p className="quiet-copy">Scenario confirmation: {props.appliedMutation === props.mutation ? `${props.mutation} applied` : 'not confirmed'}. Event stream: <span className={`transport transport-${props.streamStatus}`}>{props.streamStatus}</span>.</p>}
       {props.busy && <p className="notice-line" role="status">{props.source === 'sample' ? 'Playing sample events…' : 'Waiting for backend response and events…'}</p>}
@@ -167,9 +171,9 @@ export function RegistryAuditView({ source, tools, events, mutation, error, patc
         {patchError && <p className="notice-line" role="alert">{patchError}</p>}
         {patchLoading && <p className="quiet-copy" role="status">Loading patch history…</p>}
         {patches.length === 0 && !patchLoading && !patchError && <div className="empty-panel">No repair attempts are recorded. The active registry may still contain default tools.</div>}
-        {patches.length > 0 && <><div className="patch-history">{patches.map((patch) => <button key={patchKey(patch)} className={`patch-history-item ${selectedPatch && patchKey(selectedPatch) === patchKey(patch) ? 'selected' : ''}`} onClick={() => setChosen({ runId: currentRunId, key: patchKey(patch) })}><strong>{patch.tool_name} · {patch.run_id}</strong><span>{patch.validation_status} · {patch.recovery_status} · {patch.registry_committed ? 'committed in run' : 'not committed'}</span></button>)}</div>{patchHasMore && <button className="button button-secondary" disabled={patchLoading} onClick={onLoadMore}>Load older repair attempts</button>}</>}
+        {patches.length > 0 && <><div className="patch-history">{patches.map((patch) => <button key={patchKey(patch)} className={`patch-history-item ${selectedPatch && patchKey(selectedPatch) === patchKey(patch) ? 'selected' : ''}`} onClick={() => setChosen({ runId: currentRunId, key: patchKey(patch) })} title={`Run ${patch.run_id}`}><strong>{patch.tool_name} · {shortId(patch.run_id)}</strong><span>{patch.validation_status} · {patch.recovery_status} · {patch.registry_committed ? 'committed in run' : 'not committed'}</span></button>)}</div>{patchHasMore && <button className="button button-secondary" disabled={patchLoading} onClick={onLoadMore}>Load older repair attempts</button>}</>}
         {selectedPatch && <PatchInspector patch={selectedPatch} events={selectedPatch.run_id === currentRunId ? events : []} tools={tools} />}
-        {!selectedPatch && currentRunId && <p className="quiet-copy">Current run {currentRunId} has no recorded patch. Historical repairs remain in the list above.</p>}
+        {!selectedPatch && currentRunId && <p className="quiet-copy">Current run <DisplayId id={currentRunId} /> has no recorded patch. Historical repairs remain in the list above.</p>}
       </> : events.length === 0 ? <div className="empty-panel">Run a sample scenario to see proposal evidence, validation, and verification decisions.</div> : <><div className="audit-list">{events.filter((event) => ['tool_call_failed', 'diagnosis_started', 'patch_proposed', 'patch_validated', 'patch_rejected', 'recovery_verified', 'registry_committed'].includes(event.type)).map((event) => <div className="audit-item" key={`${event.run_id}:${event.sequence}`}><span className={`audit-dot marker-${eventTone(event.type)}`} /><div><strong>{event.type.replace(/_/g, ' ')}</strong><p>{safeText(event.data.summary ?? 'No summary available.')}</p></div><JsonDetails label="Evidence JSON" value={event.data} /></div>)}</div>{candidate === 'none' && <p className="quiet-copy">No repair candidate was needed.</p>}</>}
       {source === 'sample' && FIXTURES[mutation]?.changes.map((change) => <p className="quiet-copy" key={change}>{change}</p>)}
     </section>
@@ -177,18 +181,4 @@ export function RegistryAuditView({ source, tools, events, mutation, error, patc
   </div>;
 }
 
-export function BenchmarkView({ source, metrics, mutation, baselineEvents, healingEvents, error }: { source: DataSource; metrics: SystemMetrics | null; mutation: MutationId; baselineEvents: RunEvent[]; healingEvents: RunEvent[]; error: string | null }) {
-  const scenario = FIXTURES[mutation];
-  return <div className="tab-content"><div className="page-title"><div><span className="eyebrow">Evaluation readiness</span><h1>Benchmark</h1><p>Measured benchmark results will appear here after the evaluation runner and metric contract are connected.</p></div><SampleLabel source={source} /></div>
-    {error && <p className="error-line" role="alert">{error}</p>}
-    <section className="panel"><div className="section-heading"><div><span className="eyebrow">Metrics</span><h2>Measurement status</h2></div><Pill tone="amber">No benchmark dataset</Pill></div>
-      <div className="metric-grid"><div className="metric-card"><span>Adaptation rate</span><strong>Unavailable</strong><small>Requires evaluated healing trials</small></div><div className="metric-card"><span>Mean recovery time</span><strong>{source === 'live' && metrics?.average_recovery_time_ms != null ? `${metrics.average_recovery_time_ms} ms` : 'Unavailable'}</strong><small>Verified recoveries only</small></div><div className="metric-card"><span>Token usage</span><strong>Unavailable</strong><small>Complete per-run counts required</small></div><div className="metric-card"><span>Safe refusals</span><strong>Unavailable</strong><small>No authoritative aggregate field yet</small></div></div>
-      {source === 'live' && metrics && <p className="quiet-copy">Backend run records: {metrics.total_runs}. Verified recovery records: {metrics.verified_recoveries}. These are operational counters, not a controlled benchmark.</p>}
-      {source === 'sample' && <p className="quiet-copy">Sample data — backend not connected. The cards intentionally contain no invented rates, timings, or token counts.</p>}
-    </section>
-    <section className="panel"><div className="section-heading"><div><span className="eyebrow">Current demonstration</span><h2>Scenario comparison</h2></div><Pill tone="muted">{source === 'sample' ? scenario?.title ?? 'No sample' : 'Unavailable live'}</Pill></div>
-      {source === 'live' ? <div className="empty-panel">The backend has no controlled paired comparison operation. Single-run results appear on the Demo tab.</div> : baselineEvents.length === 0 && healingEvents.length === 0 ? <div className="empty-panel">Run Compare both on the Demo tab to view sample outcomes here.</div> : <div className="benchmark-rows"><div><span>Baseline</span><Pill tone={runTone(runOutcome(baselineEvents))}>{outcomeLabels[runOutcome(baselineEvents)]}</Pill></div><div><span>DriftGuard healing</span><Pill tone={runTone(runOutcome(healingEvents))}>{outcomeLabels[runOutcome(healingEvents)]}</Pill></div></div>}
-      {source === 'sample' && <p className="subtle-note">These are scenario illustrations, not benchmark trials or measured recovery rates.</p>}
-    </section>
-  </div>;
-}
+export { BenchmarkView } from './MetricsView';

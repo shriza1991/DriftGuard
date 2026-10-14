@@ -54,6 +54,41 @@ export interface SystemMetrics {
   token_usage: string;
   status: string;
   note: string;
+  limit: number | null;
+  offset: number | null;
+  total_runs_count: number | null;
+  run_metrics: RunMetrics[];
+}
+
+export interface ModelUsageBreakdown {
+  input_tokens: number | 'unavailable';
+  output_tokens: number | 'unavailable';
+  total_tokens: number | 'unavailable';
+  is_complete: boolean;
+  status: 'complete' | 'incomplete' | 'unavailable';
+}
+
+export interface RunMetrics {
+  run_id: string;
+  mode: string;
+  execution_type: string | null;
+  status: string;
+  duration_ms: number | null;
+  total_turns: number;
+  tool_dispatch_count: number;
+  original_dispatch_count: number;
+  repaired_dispatch_count: number;
+  repair_attempts_count: number;
+  repair_rejections_count: number;
+  verified_recoveries_count: number;
+  registry_commits_count: number;
+  recovery_duration_ms: number | null;
+  commit_latency_ms: number | null;
+  failed_recovery_duration_ms: number | null;
+  agent_token_usage: ModelUsageBreakdown;
+  diagnosis_token_usage: ModelUsageBreakdown;
+  session_token_usage: ModelUsageBreakdown;
+  audit_status: string;
 }
 
 export interface RunSummary {

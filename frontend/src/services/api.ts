@@ -1,5 +1,6 @@
 import type { CreateRunRequest, MutationResponse, PatchPage, ResetResponse, RunSummary, SystemMetrics, ToolRegistryEntry } from '../types';
 import { parsePatchPage } from '../state/patchState.ts';
+import { parseSystemMetrics } from '../state/metricsState.ts';
 
 const configuredBase = import.meta.env?.VITE_ORCHESTRATOR_URL;
 const DEFAULT_BASE = configuredBase ? configuredBase.replace(/\/$/, '') : '/api';
@@ -57,7 +58,7 @@ export class DriftGuardApiClient {
   async fetchPatches(limit = 100, offset = 0): Promise<PatchPage> {
     return parsePatchPage(await this.json(`/patches?limit=${limit}&offset=${offset}`));
   }
-  fetchMetrics(): Promise<SystemMetrics> { return this.json('/metrics'); }
+  async fetchMetrics(): Promise<SystemMetrics> { return parseSystemMetrics(await this.json('/metrics')); }
 }
 
 export const api = new DriftGuardApiClient();
