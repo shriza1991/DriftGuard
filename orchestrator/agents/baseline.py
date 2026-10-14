@@ -58,6 +58,11 @@ class BaselineAgent:
         self.timeout_seconds = timeout_seconds
         self.catalogue = get_frozen_v1_catalogue()
 
+    @property
+    def event_broadcaster(self):
+        """Uniform access to event broadcaster instance."""
+        return event_broadcaster
+
     def _extract_task_intent(self, task: str) -> Dict[str, Any]:
         """Extracts expected target ticket ID and user name from task description string."""
         ticket_match = re.search(r"ticket\s*(\d+)", task, re.IGNORECASE)
@@ -307,17 +312,26 @@ class BaselineAgent:
                     if uncertain:
                         had_uncertain_write = True
 
+                    event_data = {
+                        "status_code": exec_result.http_status,
+                        "error_code": exec_result.failure.error_code if exec_result.failure else "ERROR",
+                        "message": exec_result.failure.message if exec_result.failure else "Tool failed",
+                        "uncertain_write": uncertain,
+                    }
+                    if exec_result.classification:
+                        event_data["classification"] = {
+                            "category": exec_result.classification.semantic_category.value,
+                            "diagnosis_eligible": exec_result.classification.diagnosis_eligible,
+                            "safe_to_retry": exec_result.classification.retry_safety.safe_to_retry,
+                            "retry_reason": exec_result.classification.retry_safety.retry_reason,
+                        }
+
                     event_broadcaster.publish_event(
                         run_id=run_id,
                         event_type="tool_call_failed",
                         mode="normal",
                         tool=tool_name,
-                        data={
-                            "status_code": exec_result.http_status,
-                            "error_code": exec_result.failure.error_code if exec_result.failure else "ERROR",
-                            "message": exec_result.failure.message if exec_result.failure else "Tool failed",
-                            "uncertain_write": uncertain,
-                        },
+                        data=event_data,
                     )
                     messages.append(ToolMessage(
                         content=json.dumps(redact_secrets(err_payload)),
@@ -418,6 +432,18 @@ class BaselineAgent:
                 "diagnosis_tokens": 0,
                 "model_name": settings.model_name,
                 "provider": settings.model_provider,
+                "is_complete": True,
+            }
+        elif not has_token_usage and (total_input_tokens > 0 or total_output_tokens > 0):
+            usage_dict = {
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+                "total_tokens": total_input_tokens + total_output_tokens,
+                "subtotal_status": "incomplete_subtotal",
+                "is_complete": False,
+                "diagnosis_tokens": 0,
+                "model_name": settings.model_name,
+                "provider": settings.model_provider,
             }
         else:
             usage_dict = {
@@ -425,6 +451,7 @@ class BaselineAgent:
                 "output_tokens": "unavailable",
                 "total_tokens": "unavailable",
                 "token_usage": "unavailable",
+                "is_complete": False,
                 "diagnosis_tokens": 0,
                 "model_name": settings.model_name,
                 "provider": settings.model_provider,
@@ -453,6 +480,7 @@ class BaselineAgent:
         run_record["outcome"] = outcome
         run_record["model_usage"] = usage_dict
         run_record["usage"] = usage_dict
+        run_record["token_usage"] = usage_dict
         run_record["termination_reason"] = termination_reason
         run_record["success"] = is_success
         run_record["status"] = "completed" if is_success else "failed"

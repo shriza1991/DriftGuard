@@ -126,6 +126,10 @@ class TimingInfo(BaseModel):
     duration_ms: float
 
 
+from orchestrator.models.observation import ExecutionPhase, FailureObservation
+from orchestrator.models.classification import SemanticFailureCategory, RetrySafety, ClassificationResult
+
+
 class SanitizedFailure(BaseModel):
     """Normalized and secret-redacted failure representation preserving structured validation evidence."""
     is_drift: bool = False
@@ -141,6 +145,8 @@ class SanitizedFailure(BaseModel):
     registry_version: str = "1.0.0"
     failure_category: Optional[FailureCategory] = None
     uncertain_write: bool = False
+    observation: Optional[FailureObservation] = None
+    classification: Optional[ClassificationResult] = None
 
 
 class ExecutionResult(BaseModel):
@@ -156,6 +162,8 @@ class ExecutionResult(BaseModel):
     fingerprint: str = ""
     timing: TimingInfo
     operation_identity: OperationIdentity
+    observation: Optional[FailureObservation] = None
+    classification: Optional[ClassificationResult] = None
 
 
 class RestrictedOperationType(str, Enum):

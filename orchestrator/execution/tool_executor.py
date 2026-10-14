@@ -13,10 +13,11 @@ Adheres strictly to Member 2 safety invariants:
 - Retains uncertain_write on response parsing or transport failure after a write, with ZERO automatic retries.
 - Redacts secrets from results, failures, and representations.
 """
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional, Union, List
 import copy
 import time
 import uuid
+import asyncio
 import jsonschema
 from datetime import datetime, timezone
 import httpx
@@ -29,9 +30,14 @@ from orchestrator.models import (
     ExecutionContext,
     OperationIdentity,
     TimingInfo,
+    ExecutionPhase,
+    FailureObservation,
+    ClassificationResult,
+    SemanticFailureCategory,
 )
 from orchestrator.client.mock_client import MockBusinessApiClient, redact_secrets
 from orchestrator.registry import VersionedToolRegistry
+from orchestrator.healing.classifier import classify_failure
 from orchestrator.execution.mapping import (
     expand_mapping,
     extract_json_path,
@@ -63,6 +69,96 @@ class ToolExecutor:
         if self._client is None:
             self._client = MockBusinessApiClient()
         return self._client
+
+    def _create_failure_result(
+        self,
+        snapshot: ToolDefinition,
+        op_identity: OperationIdentity,
+        phase: ExecutionPhase,
+        failure_category: FailureCategory,
+        error_code: str,
+        message: str,
+        timing: TimingInfo,
+        http_status: int = 0,
+        normalized_errors: Optional[Dict[str, Any]] = None,
+        raw_details: Optional[Dict[str, Any]] = None,
+        original_arguments: Optional[Dict[str, Any]] = None,
+        request_evidence: Optional[Dict[str, Any]] = None,
+        response_evidence: Optional[Dict[str, Any]] = None,
+        validation_details: Optional[Dict[str, Any]] = None,
+        evidence_paths: Optional[List[str]] = None,
+        write_attempted: bool = False,
+        uncertain_write: bool = False,
+        migration_hint: Optional[str] = None,
+        known_secrets: Optional[List[str]] = None,
+    ) -> ExecutionResult:
+        """Sanitizes failure details, constructs an immutable FailureObservation, classifies the failure, and returns an ExecutionResult."""
+        clean_args = redact_secrets(original_arguments or {}, known_secrets=known_secrets)
+        clean_req = redact_secrets(request_evidence, known_secrets=known_secrets) if request_evidence is not None else None
+        clean_res = redact_secrets(response_evidence, known_secrets=known_secrets) if response_evidence is not None else None
+        clean_val = redact_secrets(validation_details, known_secrets=known_secrets) if validation_details is not None else None
+        clean_errors = redact_secrets(normalized_errors or {}, known_secrets=known_secrets)
+        clean_raw = redact_secrets(raw_details or {}, known_secrets=known_secrets)
+        clean_msg = redact_secrets(message, known_secrets=known_secrets)
+
+        obs = FailureObservation(
+            tool_name=snapshot.name,
+            registry_version=snapshot.version,
+            fingerprint=snapshot.fingerprint or snapshot.compute_fingerprint(),
+            run_id=op_identity.run_id,
+            tool_call_id=op_identity.tool_call_id,
+            idempotency_key=op_identity.idempotency_key,
+            operation_identity=op_identity,
+            execution_phase=phase,
+            method=snapshot.method.upper(),
+            endpoint=snapshot.endpoint,
+            http_status=http_status,
+            original_arguments=clean_args if isinstance(clean_args, dict) else {},
+            request_evidence=clean_req if isinstance(clean_req, dict) else None,
+            response_evidence=clean_res if isinstance(clean_res, dict) else None,
+            validation_details=clean_val if isinstance(clean_val, dict) else None,
+            evidence_paths=evidence_paths or [],
+            timing=timing,
+            write_attempted=write_attempted,
+            uncertain_write=uncertain_write,
+            raw_error_message=clean_msg,
+        )
+
+        classification = classify_failure(obs)
+        is_drift = (classification.semantic_category == SemanticFailureCategory.SCHEMA_DRIFT)
+
+        failure = SanitizedFailure(
+            is_drift=is_drift,
+            error_code=error_code,
+            message=clean_msg,
+            http_status=http_status,
+            normalized_errors=clean_errors if isinstance(clean_errors, dict) else {"error": clean_errors},
+            raw_details=clean_raw if isinstance(clean_raw, dict) else {"error": clean_raw},
+            migration_hint=migration_hint,
+            tool_name=snapshot.name,
+            endpoint=snapshot.endpoint,
+            timestamp=timing.completed_at,
+            registry_version=snapshot.version,
+            failure_category=failure_category,
+            uncertain_write=uncertain_write,
+            observation=obs,
+            classification=classification,
+        )
+
+        return ExecutionResult(
+            is_success=False,
+            outcome=None,
+            http_status=http_status,
+            normalized_result=None,
+            normalized_errors=failure.normalized_errors,
+            failure=failure,
+            registry_version=snapshot.version,
+            fingerprint=snapshot.fingerprint,
+            timing=timing,
+            operation_identity=op_identity,
+            observation=obs,
+            classification=classification,
+        )
 
     async def execute(
         self,
@@ -131,6 +227,8 @@ class ToolExecutor:
                 duration_ms=duration_ms,
             )
 
+        known_sec_list: List[str] = []
+
         # 4. Pre-HTTP argument JSON Schema validation (ZERO HTTP calls on failure)
         schema = snapshot.argument_schema.model_dump()
         validator = jsonschema.Draft7Validator(schema)
@@ -142,66 +240,48 @@ class ToolExecutor:
                 structured_errors[field] = err.message
 
             timing = make_timing()
-            failure = SanitizedFailure(
-                is_drift=False,
+            return self._create_failure_result(
+                snapshot=snapshot,
+                op_identity=op_identity,
+                phase=ExecutionPhase.PRE_VALIDATION,
+                failure_category=FailureCategory.VALIDATION_FAILURE,
                 error_code="ARGUMENT_VALIDATION_ERROR",
                 message=f"Arguments failed schema validation for tool '{snapshot.name}': {'; '.join(e.message for e in validation_errors)}",
+                timing=timing,
                 http_status=0,
                 normalized_errors=structured_errors,
                 raw_details={"validation_errors": [e.message for e in validation_errors]},
-                migration_hint=None,
-                tool_name=snapshot.name,
-                endpoint=snapshot.endpoint,
-                timestamp=timing.completed_at,
-                registry_version=snapshot.version,
-                failure_category=FailureCategory.VALIDATION_FAILURE,
+                original_arguments=args_copy,
+                validation_details=structured_errors,
+                evidence_paths=list(structured_errors.keys()),
+                write_attempted=False,
                 uncertain_write=False,
-            )
-            return ExecutionResult(
-                is_success=False,
-                outcome=None,
-                http_status=0,
-                normalized_result=None,
-                normalized_errors=structured_errors,
-                failure=failure,
-                registry_version=snapshot.version,
-                fingerprint=snapshot.fingerprint,
-                timing=timing,
-                operation_identity=op_identity,
+                known_secrets=known_sec_list,
             )
 
         # 5. Credential Resolution before network (ZERO HTTP calls on failure)
         auth_token: Optional[str] = None
         if snapshot.credential_reference:
             auth_token = self.client.credential_resolver(snapshot.credential_reference)
-            if not auth_token:
+            if auth_token:
+                known_sec_list.append(auth_token)
+            else:
                 timing = make_timing()
-                failure = SanitizedFailure(
-                    is_drift=False,
+                return self._create_failure_result(
+                    snapshot=snapshot,
+                    op_identity=op_identity,
+                    phase=ExecutionPhase.CREDENTIAL_RESOLUTION,
+                    failure_category=FailureCategory.CREDENTIAL_FAILURE,
                     error_code="MISSING_CREDENTIAL",
                     message=f"Missing credential for reference '{snapshot.credential_reference}'",
+                    timing=timing,
                     http_status=0,
                     normalized_errors={"credential_reference": snapshot.credential_reference},
                     raw_details={"credential_reference": snapshot.credential_reference},
-                    migration_hint=None,
-                    tool_name=snapshot.name,
-                    endpoint=snapshot.endpoint,
-                    timestamp=timing.completed_at,
-                    registry_version=snapshot.version,
-                    failure_category=FailureCategory.CREDENTIAL_FAILURE,
+                    original_arguments=args_copy,
+                    write_attempted=False,
                     uncertain_write=False,
-                )
-                return ExecutionResult(
-                    is_success=False,
-                    outcome=None,
-                    http_status=0,
-                    normalized_result=None,
-                    normalized_errors={"credential_reference": snapshot.credential_reference},
-                    failure=failure,
-                    registry_version=snapshot.version,
-                    fingerprint=snapshot.fingerprint,
-                    timing=timing,
-                    operation_identity=op_identity,
+                    known_secrets=known_sec_list,
                 )
 
         # 6. Request Construction from Documented Registry Mappings
@@ -209,32 +289,21 @@ class ToolExecutor:
             validate_request_mapping(snapshot.request_mapping)
         except UnsupportedMappingError as e:
             timing = make_timing()
-            failure = SanitizedFailure(
-                is_drift=False,
+            return self._create_failure_result(
+                snapshot=snapshot,
+                op_identity=op_identity,
+                phase=ExecutionPhase.REQUEST_MAPPING,
+                failure_category=FailureCategory.VALIDATION_FAILURE,
                 error_code="UNSUPPORTED_MAPPING",
                 message=str(e),
+                timing=timing,
                 http_status=0,
                 normalized_errors={"mapping_error": str(e)},
                 raw_details={"error": str(e)},
-                migration_hint=None,
-                tool_name=snapshot.name,
-                endpoint=snapshot.endpoint,
-                timestamp=timing.completed_at,
-                registry_version=snapshot.version,
-                failure_category=FailureCategory.VALIDATION_FAILURE,
+                original_arguments=args_copy,
+                write_attempted=False,
                 uncertain_write=False,
-            )
-            return ExecutionResult(
-                is_success=False,
-                outcome=None,
-                http_status=0,
-                normalized_result=None,
-                normalized_errors={"mapping_error": str(e)},
-                failure=failure,
-                registry_version=snapshot.version,
-                fingerprint=snapshot.fingerprint,
-                timing=timing,
-                operation_identity=op_identity,
+                known_secrets=known_sec_list,
             )
 
         # Path params substitution
@@ -251,62 +320,40 @@ class ToolExecutor:
                     url_path = url_path.replace(f"{{{k}}}", str(v))
         except MappingError as e:
             timing = make_timing()
-            failure = SanitizedFailure(
-                is_drift=False,
+            return self._create_failure_result(
+                snapshot=snapshot,
+                op_identity=op_identity,
+                phase=ExecutionPhase.REQUEST_MAPPING,
+                failure_category=FailureCategory.VALIDATION_FAILURE,
                 error_code="PATH_MAPPING_ERROR",
                 message=str(e),
+                timing=timing,
                 http_status=0,
                 normalized_errors={"path_error": str(e)},
                 raw_details={"error": str(e)},
-                migration_hint=None,
-                tool_name=snapshot.name,
-                endpoint=snapshot.endpoint,
-                timestamp=timing.completed_at,
-                registry_version=snapshot.version,
-                failure_category=FailureCategory.VALIDATION_FAILURE,
+                original_arguments=args_copy,
+                write_attempted=False,
                 uncertain_write=False,
-            )
-            return ExecutionResult(
-                is_success=False,
-                outcome=None,
-                http_status=0,
-                normalized_result=None,
-                normalized_errors={"path_error": str(e)},
-                failure=failure,
-                registry_version=snapshot.version,
-                fingerprint=snapshot.fingerprint,
-                timing=timing,
-                operation_identity=op_identity,
+                known_secrets=known_sec_list,
             )
 
         if "{" in url_path and "}" in url_path:
             timing = make_timing()
-            failure = SanitizedFailure(
-                is_drift=False,
+            return self._create_failure_result(
+                snapshot=snapshot,
+                op_identity=op_identity,
+                phase=ExecutionPhase.REQUEST_MAPPING,
+                failure_category=FailureCategory.VALIDATION_FAILURE,
                 error_code="UNRESOLVED_PATH_PARAMETER",
                 message=f"Endpoint contains unresolved parameter placeholders: '{url_path}'",
+                timing=timing,
                 http_status=0,
                 normalized_errors={"endpoint": url_path},
                 raw_details={"endpoint": url_path},
-                migration_hint=None,
-                tool_name=snapshot.name,
-                endpoint=snapshot.endpoint,
-                timestamp=timing.completed_at,
-                registry_version=snapshot.version,
-                failure_category=FailureCategory.VALIDATION_FAILURE,
+                original_arguments=args_copy,
+                write_attempted=False,
                 uncertain_write=False,
-            )
-            return ExecutionResult(
-                is_success=False,
-                outcome=None,
-                http_status=0,
-                normalized_result=None,
-                normalized_errors={"endpoint": url_path},
-                failure=failure,
-                registry_version=snapshot.version,
-                fingerprint=snapshot.fingerprint,
-                timing=timing,
-                operation_identity=op_identity,
+                known_secrets=known_sec_list,
             )
 
         # Query params
@@ -317,32 +364,21 @@ class ToolExecutor:
                     query_params[qk] = expand_mapping(template, args_copy)
             except MappingError as e:
                 timing = make_timing()
-                failure = SanitizedFailure(
-                    is_drift=False,
+                return self._create_failure_result(
+                    snapshot=snapshot,
+                    op_identity=op_identity,
+                    phase=ExecutionPhase.REQUEST_MAPPING,
+                    failure_category=FailureCategory.VALIDATION_FAILURE,
                     error_code="QUERY_MAPPING_ERROR",
                     message=str(e),
+                    timing=timing,
                     http_status=0,
                     normalized_errors={"query_error": str(e)},
                     raw_details={"error": str(e)},
-                    migration_hint=None,
-                    tool_name=snapshot.name,
-                    endpoint=snapshot.endpoint,
-                    timestamp=timing.completed_at,
-                    registry_version=snapshot.version,
-                    failure_category=FailureCategory.VALIDATION_FAILURE,
+                    original_arguments=args_copy,
+                    write_attempted=False,
                     uncertain_write=False,
-                )
-                return ExecutionResult(
-                    is_success=False,
-                    outcome=None,
-                    http_status=0,
-                    normalized_result=None,
-                    normalized_errors={"query_error": str(e)},
-                    failure=failure,
-                    registry_version=snapshot.version,
-                    fingerprint=snapshot.fingerprint,
-                    timing=timing,
-                    operation_identity=op_identity,
+                    known_secrets=known_sec_list,
                 )
 
         # Headers
@@ -353,32 +389,21 @@ class ToolExecutor:
                     headers[hk] = str(expand_mapping(template, args_copy))
             except MappingError as e:
                 timing = make_timing()
-                failure = SanitizedFailure(
-                    is_drift=False,
+                return self._create_failure_result(
+                    snapshot=snapshot,
+                    op_identity=op_identity,
+                    phase=ExecutionPhase.REQUEST_MAPPING,
+                    failure_category=FailureCategory.VALIDATION_FAILURE,
                     error_code="HEADER_MAPPING_ERROR",
                     message=str(e),
+                    timing=timing,
                     http_status=0,
                     normalized_errors={"header_error": str(e)},
                     raw_details={"error": str(e)},
-                    migration_hint=None,
-                    tool_name=snapshot.name,
-                    endpoint=snapshot.endpoint,
-                    timestamp=timing.completed_at,
-                    registry_version=snapshot.version,
-                    failure_category=FailureCategory.VALIDATION_FAILURE,
+                    original_arguments=args_copy,
+                    write_attempted=False,
                     uncertain_write=False,
-                )
-                return ExecutionResult(
-                    is_success=False,
-                    outcome=None,
-                    http_status=0,
-                    normalized_result=None,
-                    normalized_errors={"header_error": str(e)},
-                    failure=failure,
-                    registry_version=snapshot.version,
-                    fingerprint=snapshot.fingerprint,
-                    timing=timing,
-                    operation_identity=op_identity,
+                    known_secrets=known_sec_list,
                 )
 
         if idempotency_key:
@@ -394,33 +419,30 @@ class ToolExecutor:
                 json_body = expand_mapping(snapshot.request_mapping["body"], args_copy)
             except MappingError as e:
                 timing = make_timing()
-                failure = SanitizedFailure(
-                    is_drift=False,
+                return self._create_failure_result(
+                    snapshot=snapshot,
+                    op_identity=op_identity,
+                    phase=ExecutionPhase.REQUEST_MAPPING,
+                    failure_category=FailureCategory.VALIDATION_FAILURE,
                     error_code="BODY_MAPPING_ERROR",
                     message=str(e),
+                    timing=timing,
                     http_status=0,
                     normalized_errors={"body_error": str(e)},
                     raw_details={"error": str(e)},
-                    migration_hint=None,
-                    tool_name=snapshot.name,
-                    endpoint=snapshot.endpoint,
-                    timestamp=timing.completed_at,
-                    registry_version=snapshot.version,
-                    failure_category=FailureCategory.VALIDATION_FAILURE,
+                    original_arguments=args_copy,
+                    write_attempted=False,
                     uncertain_write=False,
+                    known_secrets=known_sec_list,
                 )
-                return ExecutionResult(
-                    is_success=False,
-                    outcome=None,
-                    http_status=0,
-                    normalized_result=None,
-                    normalized_errors={"body_error": str(e)},
-                    failure=failure,
-                    registry_version=snapshot.version,
-                    fingerprint=snapshot.fingerprint,
-                    timing=timing,
-                    operation_identity=op_identity,
-                )
+
+        req_evidence = {
+            "method": method,
+            "url": url_path,
+            "params": query_params,
+            "headers": headers,
+            "body": json_body,
+        }
 
         # 7. Safe Network Execution via Injectable Business Client
         try:
@@ -431,34 +453,45 @@ class ToolExecutor:
                 json=json_body if json_body is not None else None,
                 headers=headers,
             )
-        except httpx.RequestError as exc:
+        except (httpx.RequestError, asyncio.TimeoutError) as exc:
             timing = make_timing()
-            failure = SanitizedFailure(
-                is_drift=False,
+            return self._create_failure_result(
+                snapshot=snapshot,
+                op_identity=op_identity,
+                phase=ExecutionPhase.HTTP_DISPATCH,
+                failure_category=FailureCategory.TRANSPORT_FAILURE,
                 error_code="TRANSPORT_ERROR",
                 message=f"Request to {url_path} failed: {str(exc)}",
+                timing=timing,
                 http_status=503,
                 normalized_errors={"transport_error": str(exc)},
                 raw_details={"error": str(exc)},
-                migration_hint=None,
-                tool_name=snapshot.name,
-                endpoint=url_path,
-                timestamp=timing.completed_at,
-                registry_version=snapshot.version,
-                failure_category=FailureCategory.TRANSPORT_FAILURE,
+                original_arguments=args_copy,
+                request_evidence=req_evidence,
+                response_evidence=None,
+                write_attempted=is_write,
                 uncertain_write=is_write,  # POST write may or may not have reached server
+                known_secrets=known_sec_list,
             )
-            return ExecutionResult(
-                is_success=False,
-                outcome=None,
-                http_status=503,
-                normalized_result=None,
-                normalized_errors={"transport_error": str(exc)},
-                failure=failure,
-                registry_version=snapshot.version,
-                fingerprint=snapshot.fingerprint,
+        except asyncio.CancelledError:
+            timing = make_timing()
+            return self._create_failure_result(
+                snapshot=snapshot,
+                op_identity=op_identity,
+                phase=ExecutionPhase.HTTP_DISPATCH,
+                failure_category=FailureCategory.TRANSPORT_FAILURE,
+                error_code="OPERATION_CANCELLED",
+                message=f"Request to {url_path} was cancelled",
                 timing=timing,
-                operation_identity=op_identity,
+                http_status=0,
+                normalized_errors={"cancellation": "Operation cancelled during dispatch"},
+                raw_details={"error": "CancelledError"},
+                original_arguments=args_copy,
+                request_evidence=req_evidence,
+                response_evidence=None,
+                write_attempted=is_write,
+                uncertain_write=is_write,  # POST write cancellation leaves downstream state uncertain
+                known_secrets=known_sec_list,
             )
 
         timing = make_timing()
@@ -471,117 +504,101 @@ class ToolExecutor:
                 body = {"raw": response.text}
             else:
                 # 2xx with unparseable JSON
-                failure = SanitizedFailure(
-                    is_drift=False,
+                return self._create_failure_result(
+                    snapshot=snapshot,
+                    op_identity=op_identity,
+                    phase=ExecutionPhase.RESPONSE_PARSING,
+                    failure_category=FailureCategory.RESPONSE_PARSING_FAILURE,
                     error_code="INVALID_RESPONSE_JSON",
                     message=f"Failed to parse response body as JSON: {str(exc)}",
+                    timing=timing,
                     http_status=response.status_code,
                     normalized_errors={"raw_response": response.text},
                     raw_details={"raw_response": response.text},
-                    migration_hint=None,
-                    tool_name=snapshot.name,
-                    endpoint=url_path,
-                    timestamp=timing.completed_at,
-                    registry_version=snapshot.version,
-                    failure_category=FailureCategory.RESPONSE_PARSING_FAILURE,
+                    original_arguments=args_copy,
+                    request_evidence=req_evidence,
+                    response_evidence={"status_code": response.status_code, "text": response.text},
+                    write_attempted=is_write,
                     uncertain_write=is_write,  # 200 write occurred but parsing failed: never repeat!
+                    known_secrets=known_sec_list,
                 )
-                return ExecutionResult(
-                    is_success=False,
-                    outcome=None,
-                    http_status=response.status_code,
-                    normalized_result=None,
-                    normalized_errors={"raw_response": response.text},
-                    failure=failure,
-                    registry_version=snapshot.version,
-                    fingerprint=snapshot.fingerprint,
-                    timing=timing,
-                    operation_identity=op_identity,
-                )
+
+        res_evidence = {
+            "status_code": response.status_code,
+            "body": body,
+            "headers": dict(response.headers),
+        }
 
         # 9. HTTP Rejection (>= 400)
         if response.status_code >= 400:
-            failure = self.client._normalize_failure(
+            norm_failure = self.client._normalize_failure(
                 status_code=response.status_code,
                 response_data=body,
                 tool_name=snapshot.name,
                 endpoint=url_path,
                 registry_version=snapshot.version,
+                known_secrets=known_sec_list,
             )
-            # Preserve evidence without classifying as drift in Task 3
-            failure.is_drift = False
-            failure.failure_category = FailureCategory.HTTP_REJECTION
-            failure.uncertain_write = False
-            return ExecutionResult(
-                is_success=False,
-                outcome=None,
-                http_status=response.status_code,
-                normalized_result=None,
-                normalized_errors=failure.normalized_errors,
-                failure=failure,
-                registry_version=snapshot.version,
-                fingerprint=snapshot.fingerprint,
+            uncertain = is_write and response.status_code >= 500
+            return self._create_failure_result(
+                snapshot=snapshot,
+                op_identity=op_identity,
+                phase=ExecutionPhase.HTTP_DISPATCH,
+                failure_category=FailureCategory.HTTP_REJECTION,
+                error_code=norm_failure.error_code,
+                message=norm_failure.message,
                 timing=timing,
-                operation_identity=op_identity,
+                http_status=response.status_code,
+                normalized_errors=norm_failure.normalized_errors,
+                raw_details=norm_failure.raw_details,
+                original_arguments=args_copy,
+                request_evidence=req_evidence,
+                response_evidence=res_evidence,
+                write_attempted=is_write,
+                uncertain_write=uncertain,
+                migration_hint=norm_failure.migration_hint,
+                known_secrets=known_sec_list,
             )
 
         # 10. Check for empty list or ambiguity for directory lookups like find_user
         if snapshot.name == "find_user" and isinstance(body, list):
             if len(body) == 0:
-                failure = SanitizedFailure(
-                    is_drift=False,
+                return self._create_failure_result(
+                    snapshot=snapshot,
+                    op_identity=op_identity,
+                    phase=ExecutionPhase.RESPONSE_PARSING,
+                    failure_category=FailureCategory.RESPONSE_PARSING_FAILURE,
                     error_code="USER_NOT_FOUND",
                     message="Could not find user Maya in user directory",
+                    timing=timing,
                     http_status=response.status_code,
                     normalized_errors={"user_search": "Empty results returned for 'Maya'"},
                     raw_details={"raw_response": body},
-                    migration_hint=None,
-                    tool_name=snapshot.name,
-                    endpoint=url_path,
-                    timestamp=timing.completed_at,
-                    registry_version=snapshot.version,
-                    failure_category=FailureCategory.RESPONSE_PARSING_FAILURE,
+                    original_arguments=args_copy,
+                    request_evidence=req_evidence,
+                    response_evidence=res_evidence,
+                    write_attempted=False,
                     uncertain_write=False,
-                )
-                return ExecutionResult(
-                    is_success=False,
-                    outcome=None,
-                    http_status=response.status_code,
-                    normalized_result=None,
-                    raw_response=body,
-                    failure=failure,
-                    registry_version=snapshot.version,
-                    fingerprint=snapshot.fingerprint,
-                    timing=timing,
-                    operation_identity=op_identity,
+                    known_secrets=known_sec_list,
                 )
             elif len(body) > 1:
-                failure = SanitizedFailure(
-                    is_drift=False,
+                return self._create_failure_result(
+                    snapshot=snapshot,
+                    op_identity=op_identity,
+                    phase=ExecutionPhase.RESPONSE_PARSING,
+                    failure_category=FailureCategory.RESPONSE_PARSING_FAILURE,
                     error_code="AMBIGUOUS_USER_RESOLUTION",
                     message="Ambiguous user resolution: multiple users returned for 'Maya'",
+                    timing=timing,
                     http_status=response.status_code,
                     normalized_errors={"user_search": f"{len(body)} matches found for 'Maya'"},
                     raw_details={"raw_response": body},
-                    migration_hint=None,
-                    tool_name=snapshot.name,
-                    endpoint=url_path,
-                    timestamp=timing.completed_at,
-                    registry_version=snapshot.version,
-                    failure_category=FailureCategory.RESPONSE_PARSING_FAILURE,
+                    original_arguments=args_copy,
+                    request_evidence=req_evidence,
+                    response_evidence=res_evidence,
+                    write_attempted=False,
                     uncertain_write=False,
-                )
-                return ExecutionResult(
-                    is_success=False,
-                    outcome=None,
-                    http_status=response.status_code,
-                    normalized_result=None,
-                    raw_response=body,
-                    failure=failure,
-                    registry_version=snapshot.version,
-                    fingerprint=snapshot.fingerprint,
-                    timing=timing,
-                    operation_identity=op_identity,
+                    known_secrets=known_sec_list,
                 )
 
         # 11. Response Mapping Extraction
@@ -592,40 +609,28 @@ class ToolExecutor:
                     val = extract_json_path(json_path, body)
                     mapped_outcome[out_key] = val
             except MappingError as me:
-                known_sec_list = [auth_token] if auth_token else None
-                failure = SanitizedFailure(
-                    is_drift=False,
+                return self._create_failure_result(
+                    snapshot=snapshot,
+                    op_identity=op_identity,
+                    phase=ExecutionPhase.RESPONSE_PARSING,
+                    failure_category=FailureCategory.RESPONSE_PARSING_FAILURE,
                     error_code="RESPONSE_MAPPING_ERROR",
                     message=f"Response mapping failed for '{snapshot.name}': {str(me)}",
+                    timing=timing,
                     http_status=response.status_code,
                     normalized_errors={"mapping_error": str(me), "response": redact_secrets(body, known_secrets=known_sec_list)},
                     raw_details=redact_secrets(body if isinstance(body, dict) else {"raw": body}, known_secrets=known_sec_list),
-                    migration_hint=None,
-                    tool_name=snapshot.name,
-                    endpoint=url_path,
-                    timestamp=timing.completed_at,
-                    registry_version=snapshot.version,
-                    failure_category=FailureCategory.RESPONSE_PARSING_FAILURE,
+                    original_arguments=args_copy,
+                    request_evidence=req_evidence,
+                    response_evidence=res_evidence,
+                    write_attempted=is_write,
                     uncertain_write=is_write,  # Write succeeded on downstream server, but output unusable
-                )
-                return ExecutionResult(
-                    is_success=False,
-                    outcome=None,
-                    http_status=response.status_code,
-                    normalized_result=None,
-                    raw_response=body,
-                    normalized_errors={"mapping_error": str(me)},
-                    failure=failure,
-                    registry_version=snapshot.version,
-                    fingerprint=snapshot.fingerprint,
-                    timing=timing,
-                    operation_identity=op_identity,
+                    known_secrets=known_sec_list,
                 )
         else:
             mapped_outcome = body if isinstance(body, dict) else {"result": body}
 
         # Redact secrets before returning
-        known_sec_list = [auth_token] if auth_token else None
         clean_outcome = redact_secrets(mapped_outcome, known_secrets=known_sec_list)
         clean_raw = redact_secrets(body if isinstance(body, dict) else {"result": body}, known_secrets=known_sec_list)
 
@@ -641,4 +646,7 @@ class ToolExecutor:
             fingerprint=snapshot.fingerprint,
             timing=timing,
             operation_identity=op_identity,
+            observation=None,
+            classification=None,
         )
+

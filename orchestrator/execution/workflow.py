@@ -15,6 +15,7 @@ Adheres to Member 2 safety invariants:
 """
 import time
 import uuid
+import re
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 
@@ -22,7 +23,7 @@ from orchestrator.registry import VersionedToolRegistry
 from orchestrator.models import ToolDefinition, ExecutionContext
 from orchestrator.client.mock_client import MockBusinessApiClient
 from orchestrator.execution.tool_executor import ToolExecutor
-from orchestrator.execution.events import event_broadcaster
+from orchestrator.execution.events import event_broadcaster, EventBroadcaster
 from orchestrator.execution.tool_caller import http_tool_caller, HttpToolCaller, ToolExecutionError
 from orchestrator.healing.stubs import healing_engine
 from orchestrator.metrics.tracker import metrics_tracker
@@ -46,6 +47,10 @@ class WorkflowExecutionManager:
 
     def set_registry(self, registry: VersionedToolRegistry) -> None:
         self._registry = registry
+
+    @property
+    def event_broadcaster(self) -> EventBroadcaster:
+        return event_broadcaster
 
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
         return self._runs_store.get(run_id)
@@ -74,6 +79,9 @@ class WorkflowExecutionManager:
         active_registry = registry or self._registry
         active_client = client or self._client
         executor = ToolExecutor(registry=active_registry, client=active_client)
+
+        ticket_match = re.search(r"ticket\s*(\d+)", task, re.IGNORECASE)
+        target_ticket = int(ticket_match.group(1)) if ticket_match else 81
 
         run_record: Dict[str, Any] = {
             "run_id": run_id,
@@ -160,12 +168,20 @@ class WorkflowExecutionManager:
                     status_code = res_1.http_status
                     err_code = res_1.failure.error_code if res_1.failure else "EXECUTION_ERROR"
                     err_msg = res_1.failure.message if res_1.failure else "find_user failed"
+                    event_data_1 = {"status_code": status_code, "error_code": err_code, "message": err_msg}
+                    if res_1.classification:
+                        event_data_1["classification"] = {
+                            "category": res_1.classification.semantic_category.value,
+                            "diagnosis_eligible": res_1.classification.diagnosis_eligible,
+                            "safe_to_retry": res_1.classification.retry_safety.safe_to_retry,
+                            "retry_reason": res_1.classification.retry_safety.retry_reason,
+                        }
                     event_broadcaster.publish_event(
                         run_id=run_id,
                         event_type="tool_call_failed",
                         mode=mode,
                         tool="find_user",
-                        data={"status_code": status_code, "error_code": err_code, "message": err_msg},
+                        data=event_data_1,
                     )
                     duration_ms = round((time.time() - start_time) * 1000, 2)
                     event_broadcaster.publish_event(
@@ -210,8 +226,8 @@ class WorkflowExecutionManager:
                 if candidate_snapshot and candidate_snapshot.name == "assign_ticket"
                 else active_registry.get("assign_ticket")
             )
-            assign_args = {"ticket_id": 81, "user_id": maya_id}
-            assign_idemp_key = f"dg-idemp-assign-81-{uuid.uuid4().hex[:8]}"
+            assign_args = {"ticket_id": target_ticket, "user_id": maya_id}
+            assign_idemp_key = f"dg-idemp-assign-{target_ticket}-{uuid.uuid4().hex[:8]}"
 
             event_broadcaster.publish_event(
                 run_id=run_id,
@@ -299,17 +315,26 @@ class WorkflowExecutionManager:
                     err_msg = res_2.failure.message if res_2.failure else "assign_ticket failed"
                     uncertain = res_2.failure.uncertain_write if res_2.failure else False
 
+                    event_data_2 = {
+                        "status_code": status_code,
+                        "error_code": err_code,
+                        "message": err_msg,
+                        "uncertain_write": uncertain,
+                    }
+                    if res_2.classification:
+                        event_data_2["classification"] = {
+                            "category": res_2.classification.semantic_category.value,
+                            "diagnosis_eligible": res_2.classification.diagnosis_eligible,
+                            "safe_to_retry": res_2.classification.retry_safety.safe_to_retry,
+                            "retry_reason": res_2.classification.retry_safety.retry_reason,
+                        }
+
                     event_broadcaster.publish_event(
                         run_id=run_id,
                         event_type="tool_call_failed",
                         mode=mode,
                         tool="assign_ticket",
-                        data={
-                            "status_code": status_code,
-                            "error_code": err_code,
-                            "message": err_msg,
-                            "uncertain_write": uncertain,
-                        },
+                        data=event_data_2,
                     )
 
                     if mode == "healing":
@@ -378,7 +403,7 @@ class WorkflowExecutionManager:
                 mode=mode,
                 tool="get_ticket",
                 data={
-                    "arguments": {"ticket_id": 81},
+                    "arguments": {"ticket_id": target_ticket},
                     "tool_call_id": call_id_3,
                     "tool_version": get_tool.version,
                     "fingerprint": get_tool.fingerprint or get_tool.compute_fingerprint(),
@@ -386,9 +411,9 @@ class WorkflowExecutionManager:
             )
 
             if is_caller_patched:
-                ticket_data = await http_tool_caller.call_tool(get_tool, {"ticket_id": 81})
+                ticket_data = await http_tool_caller.call_tool(get_tool, {"ticket_id": target_ticket})
                 verified_assignee = ticket_data.get("assignee_id")
-                verified_ticket_id = ticket_data.get("id", 81)
+                verified_ticket_id = ticket_data.get("id", target_ticket)
                 ticket_status = ticket_data.get("status", "assigned")
             else:
                 ctx_3 = ExecutionContext(
@@ -396,15 +421,23 @@ class WorkflowExecutionManager:
                     tool_call_id=call_id_3,
                     candidate_snapshot=get_tool if candidate_snapshot else None,
                 )
-                res_3 = await executor.execute("get_ticket", {"ticket_id": 81}, context=ctx_3)
+                res_3 = await executor.execute("get_ticket", {"ticket_id": target_ticket}, context=ctx_3)
                 if not res_3.is_success:
                     err_msg = res_3.failure.message if res_3.failure else "get_ticket verification call failed"
+                    event_data_3 = {"status_code": res_3.http_status, "message": err_msg}
+                    if res_3.classification:
+                        event_data_3["classification"] = {
+                            "category": res_3.classification.semantic_category.value,
+                            "diagnosis_eligible": res_3.classification.diagnosis_eligible,
+                            "safe_to_retry": res_3.classification.retry_safety.safe_to_retry,
+                            "retry_reason": res_3.classification.retry_safety.retry_reason,
+                        }
                     event_broadcaster.publish_event(
                         run_id=run_id,
                         event_type="tool_call_failed",
                         mode=mode,
                         tool="get_ticket",
-                        data={"status_code": res_3.http_status, "message": err_msg},
+                        data=event_data_3,
                     )
                     duration_ms = round((time.time() - start_time) * 1000, 2)
                     event_broadcaster.publish_event(
@@ -430,17 +463,17 @@ class WorkflowExecutionManager:
             # Never declare success from HTTP 200 alone!
             # -------------------------------------------------------------
             is_assignee_verified = str(verified_assignee) == str(maya_id)
-            is_ticket_verified = str(verified_ticket_id) == "81"
+            is_ticket_verified = str(verified_ticket_id) == str(target_ticket)
 
             duration_ms = round((time.time() - start_time) * 1000, 2)
 
             if not (is_assignee_verified and is_ticket_verified):
                 mismatch_reason = (
-                    f"Verification mismatch: expected ticket 81 assigned to '{maya_id}', "
+                    f"Verification mismatch: expected ticket {target_ticket} assigned to '{maya_id}', "
                     f"but verified ticket '{verified_ticket_id}' assignee is '{verified_assignee}'"
                 )
                 failed_outcome = {
-                    "ticket_id": 81,
+                    "ticket_id": target_ticket,
                     "target_user_name": "Maya",
                     "resolved_user_id": maya_id,
                     "verified_assignee_id": verified_assignee,
@@ -465,7 +498,7 @@ class WorkflowExecutionManager:
 
             # Verification Succeeded
             outcome = {
-                "ticket_id": 81,
+                "ticket_id": target_ticket,
                 "target_user_name": "Maya",
                 "resolved_user_id": maya_id,
                 "verified_assignee_id": verified_assignee,

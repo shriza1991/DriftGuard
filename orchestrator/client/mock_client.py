@@ -138,11 +138,15 @@ class MockBusinessApiClient:
         response_data: Any,
         tool_name: str,
         endpoint: str,
-        registry_version: str = "1.0.0"
+        registry_version: str = "1.0.0",
+        known_secrets: Optional[List[str]] = None,
     ) -> SanitizedFailure:
         """Normalizes downstream failure response while preserving structured evidence."""
         now_iso = datetime.now(timezone.utc).isoformat()
-        clean_raw = redact_secrets(response_data if isinstance(response_data, dict) else {"raw_response": str(response_data)})
+        clean_raw = redact_secrets(
+            response_data if isinstance(response_data, dict) else {"raw_response": str(response_data)},
+            known_secrets=known_secrets,
+        )
 
         code = "HTTP_ERROR"
         message = f"Endpoint returned HTTP {status_code}"
@@ -166,6 +170,8 @@ class MockBusinessApiClient:
                 details = response_data.get("details")
             hint = response_data.get("hint") or hint
 
+        clean_message = redact_secrets(message, known_secrets=known_secrets)
+
         is_drift = status_code in [400, 422] or code in [
             "SCHEMA_MISMATCH",
             "MISSING_REQUIRED_FIELD",
@@ -178,15 +184,15 @@ class MockBusinessApiClient:
         return SanitizedFailure(
             is_drift=is_drift,
             error_code=code,
-            message=message,
+            message=clean_message,
             http_status=status_code,
-            normalized_errors=redact_secrets(details),
+            normalized_errors=redact_secrets(details, known_secrets=known_secrets),
             raw_details=clean_raw,
             migration_hint=hint,
             tool_name=tool_name,
             endpoint=endpoint,
             timestamp=now_iso,
-            registry_version=registry_version
+            registry_version=registry_version,
         )
 
     async def find_user(self, name: str) -> ExecutionResult:

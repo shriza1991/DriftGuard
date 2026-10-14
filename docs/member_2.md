@@ -122,20 +122,40 @@
 
 ---
 
+- [x] **Task 5: Failure Interception & Semantic Classification (`orchestrator/healing/`)**:
+  - `orchestrator/models/observation.py`: Immutable, sanitized `FailureObservation` capturing tool name, registry version, canonical SHA-256 fingerprint, execution identities (`run_id`, `tool_call_id`, `idempotency_key`), `ExecutionPhase`, method, endpoint, HTTP status, original argument snapshot, request/response evidence, structured validation details, evidence paths, timing, and `uncertain_write` flag. Guaranteed zero credentials, administrative mutation states, or scenario answer leaks.
+  - `orchestrator/models/classification.py`: Strongly typed `ClassificationResult` and `SemanticFailureCategory` (`SCHEMA_DRIFT`, `INVALID_INPUT`, `BUSINESS_RULE_REJECTION`, `AUTHENTICATION_AUTHORIZATION`, `TRANSIENT_SERVICE_FAILURE`, `AMBIGUOUS`). Preserves existing execution-layer `FailureCategory` while modeling semantic classification independently.
+  - `orchestrator/models/classification.py` (`RetrySafety`): Models retry safety independently from diagnosis eligibility. Encapsulates `safe_to_retry`, plain-language `reason`, `uncertain_write`, `idempotent_method`, and `requires_input_adaptation`. Uncertain writes are strictly non-retryable regardless of diagnosis eligibility.
+  - `orchestrator/healing/classifier.py` (`classify_failure`): Pure deterministic classifier inspecting observed runtime evidence:
+    - Pre-execution schema failures classified as `INVALID_INPUT` (zero downstream drift).
+    - Structured downstream validation errors (`expected_schema`, `missing`, `unexpected`, `migration_hint`) identify `SCHEMA_DRIFT` candidates.
+    - Bare HTTP 400/422 status codes without structured details safely degrade to `AMBIGUOUS`.
+    - Documented business error codes (`TICKET_CLOSED`, `TICKET_NOT_FOUND`) classified as `BUSINESS_RULE_REJECTION`.
+    - Standard 401/403 classified as `AUTHENTICATION_AUTHORIZATION`; explicit new-header requirements identify `SCHEMA_DRIFT` candidates while clearly affirming credentials cannot be fabricated.
+    - Known missing resources (404 on `/tickets/999`) classified as `BUSINESS_RULE_REJECTION`; 404 on endpoints degraded to `AMBIGUOUS`.
+    - Transport drops, 429 rate limits, and 5xx errors classified as `TRANSIENT_SERVICE_FAILURE`.
+    - Post-write response parsing failures retain write uncertainty and forbid blind retries.
+    - Contradictory, malformed, or missing evidence degrades safely to `AMBIGUOUS`.
+  - Shared Executor Boundary (`orchestrator/execution/tool_executor.py`): All failure paths in `ToolExecutor` construct a sanitized `FailureObservation`, classify it via `classify_failure`, and attach `failure.observation` and `failure.classification` to `ExecutionResult`. Both deterministic workflows and baseline agent paths receive uniform classifications.
+  - Event Integration (`orchestrator/execution/workflow.py`, `orchestrator/agents/baseline.py`): Attached sanitized classification metadata to `tool_call_failed` event data without altering the public event schema or inventing diagnosis activity.
+  - Targeted Test Suite (`tests/healing/test_failure_classification.py`): 13 comprehensive unit tests validating bare 400/422 ambiguity, explicit drift candidate detection, business rule rejections, rename non-correspondence invariants, auth header drift, missing resources, rate limits and transport failures, post-write parsing failure uncertainty, contradictory evidence degradation, protection of uncertain writes over diagnosis eligibility, identical classification across execution paths, absolute secret redaction, dynamic ticket verification, and write timeout uncertainty.
+  - Full Regression Verification: All 68 backend tests (`tests/mock_api`, `tests/evaluation`, `tests/healing`) passing cleanly.
+
+---
+
 ## 4. Next Tasks
 
-- [ ] **Task 5: Failure Classification & Diagnostic Engine (`orchestrator/healing/diagnosis.py`)**:
-  - Distinguish transient failures (5xx, 429) from contract drift (400, 401, 422).
-  - Extract failure signals from structured HTTP response bodies and status codes.
-  - Apply deterministic heuristic rules first (rename matching, type coercion, unnesting).
-  - Fallback to LLM-assisted repair planning with strict prompt constraints.
+- [ ] **Task 6: Deterministic Repair Proposals (`orchestrator/healing/repair.py`)**:
+  - Formulate deterministic, statically verified argument translation proposals (`rename_argument`, `cast_type`, `nest_argument`, `set_header`) for candidates classified as `SCHEMA_DRIFT`.
+  - Authorize proposals against safety constraints; business intent parameters (`ticket_id`, `user_id`) remain strictly immutable.
+  - Retain repair and patch staging as explicitly pending execution.
 
-- [ ] **Task 6: Safety Validation & Invariants (`orchestrator/healing/validator.py`)**:
+- [ ] **Task 7: Safety Validation & Invariants (`orchestrator/healing/validator.py`)**:
   - Verify proposed patch does not invent new business arguments (e.g. `priority_tier`).
   - Verify no lossy conversions or unapproved domain redirects.
   - Keep caller arguments immutable.
 
-- [ ] **Task 7: Staged Patch & Verified Execution (`orchestrator/healing/recovery.py`)**:
+- [ ] **Task 8: Staged Patch & Verified Execution (`orchestrator/healing/recovery.py`)**:
   - Stage the proposed patch in memory with per-tool lock.
   - Execute exactly ONE retry call with idempotency key.
   - If retry succeeds, perform independent read verification via `GET /tickets/81`.

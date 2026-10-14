@@ -85,6 +85,16 @@
 - **Decision**: The baseline agent never accepts model claims as proof of completion. It derives business intent from trusted inputs and genuine tool call evidence, then independently queries `GET /tickets/81` to verify `actual_assignee == resolved_user_id`. A final "done" response without matching downstream state is strictly flagged as a `verification_failed` failure. Real provider token counts are aggregated without double-counting; missing usage is recorded as `"unavailable"`, and baseline diagnosis tokens are strictly 0.
 - **Rationale**: Prevents false-positive success reporting and guarantees truthful, auditable evaluation metrics.
 
+## ADR-018: Strict Separation of Execution-Layer Categories from Semantic Classification
+- **Context**: The execution runtime already tracks `FailureCategory` (`VALIDATION_FAILURE`, `HTTP_REJECTION`, `TRANSPORT_FAILURE`, etc.) for network and transport handling. Conflating this with semantic classification (schema drift vs. invalid caller input vs. business rejections) would lead to loss of technical execution context.
+- **Decision**: Introduce a dedicated, strongly typed `SemanticFailureCategory` (`schema_drift`, `invalid_input`, `business_rule_rejection`, `authentication_authorization`, `transient_service_failure`, `ambiguous`) within `ClassificationResult`. Both layers are preserved on `SanitizedFailure`: `failure.failure_category` represents the execution-level transport mechanism, while `failure.classification` represents the semantic reasoning.
+- **Rationale**: Clean separation of concerns allows the execution engine to handle transport invariants while the healing pipeline reasons about semantic contract evolution.
+
+## ADR-019: Decoupling of Retry Safety from Diagnosis Eligibility
+- **Context**: If an error is classified as schema drift, it may be eligible for repair diagnosis. However, if the error occurred during or after a stateful write (such as a POST write where the network disconnected or response parsing failed), blind retries risk duplicate writes or corrupted state.
+- **Decision**: Retry safety is modeled independently from diagnosis eligibility via `RetrySafety`. Diagnosis eligibility indicates whether a candidate patch can be derived from the evidence; `RetrySafety.safe_to_retry` evaluates whether repeating the request is safe. Uncertain writes are strictly marked `safe_to_retry: false` regardless of diagnosis eligibility, and idempotency keys alone do not authorize unverified writes.
+- **Rationale**: Eliminates dangerous race conditions and write corruption on downstream systems.
+
 ---
 
 ## Technical Clarifications & Invariant Reminders

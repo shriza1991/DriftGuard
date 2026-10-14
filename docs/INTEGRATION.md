@@ -248,26 +248,121 @@ Response payload (`RunSummaryResponse`):
 
 ---
 
-## 6. Contract Gaps & Coordination Handoffs
+## 6. Failure Interception & Semantic Classification (Member 2 Task 5)
 
-### 6.1 For Member 1 (Mock API & Mutations)
-1. **Idempotency Key Header**: Confirmed that `POST /tickets/assign` accepts and checks `Idempotency-Key` header. Any unassigned endpoints should specify whether idempotency headers are supported.
-2. **User Search Query**: `GET /users?name=Maya` currently returns a JSON list. Note that returning an empty list `[]` triggers safe `USER_NOT_FOUND` refusal, while returning multiple users triggers `AMBIGUOUS_USER_RESOLUTION` refusal.
-3. **Missing Auth Header Status**: Confirm whether future mutation scenarios return `401 Unauthorized` or `422 Unprocessable Content` when `Authorization` is omitted. Both are handled safely by `MockBusinessApiClient`.
-4. **Baseline Invocation Interface**: Use `POST /runs` with `execution_type="model_driven_baseline"` for benchmarking without healing.
+### 6.1 `FailureObservation` Schema
+Constructed defensively at the shared `ToolExecutor` boundary upon any tool failure:
+```python
+class FailureObservation(BaseModel):
+    tool_name: str
+    registry_version: str
+    fingerprint: str
+    run_id: Optional[str]
+    tool_call_id: Optional[str]
+    idempotency_key: Optional[str]
+    operation_identity: OperationIdentity
+    execution_phase: ExecutionPhase  # PRE_VALIDATION, CREDENTIAL_RESOLUTION, REQUEST_MAPPING, HTTP_DISPATCH, RESPONSE_PARSING, READ_VERIFICATION
+    method: str
+    endpoint: str
+    http_status: Optional[int]
+    original_arguments: Dict[str, Any]       # Immutable caller snapshot
+    request_evidence: Optional[Dict[str, Any]]
+    response_evidence: Optional[Dict[str, Any]]
+    validation_details: Optional[Dict[str, Any]]
+    evidence_paths: List[str]
+    timing: TimingInfo
+    write_attempted: bool
+    uncertain_write: bool                    # Preserves uncertain-write protection
+    raw_error_message: Optional[str]         # Recursively redacted
+    timestamp: str
+```
 
-### 6.2 For Member 3 (Frontend & SSE Events)
-1. **Execution Type Tags**:
-   - `data.execution_type = "model_driven_baseline"`: Emitted for genuine model-driven baseline runs.
-   - `data.execution_type = "deterministic_normal_workflow"`: Emitted for deterministic script runs.
-2. **Tool Call Metadata**: `tool_call_started` events include `tool_call_id`, `tool_version`, and canonical `fingerprint`.
-3. **Tool Call Failure Metadata**: `tool_call_failed` events include `status_code`, `error_code`, `message`, and `uncertain_write` flag.
-4. **Read Verification Output**: `run_completed` and `run_failed` include structured `outcome` showing `target_user_name`, `resolved_user_id`, `verified_assignee_id`, and boolean `verified`.
-5. **Usage & Termination Fields**: `run_completed` and `run_failed` include `model_usage` (`input_tokens`, `output_tokens`, `total_tokens`, `diagnosis_tokens`) and `termination_reason` (`completed_and_verified`, `verification_failed`, `max_turns_exceeded`, `deadline_exceeded`).
+### 6.2 Semantic Categories (`SemanticFailureCategory`)
+| Category | Definition | Default Diagnosis Eligibility |
+|---|---|---|
+| `schema_drift` | Structured downstream schema mismatch evidence (`expected_schema`, `missing`, `unexpected`, `migration_hint`, newly required header). Identifies candidate for repair. | `True` |
+| `invalid_input` | Pre-dispatch argument schema rejection by local JSON Schema Draft 7 validator. Represents bad caller input, not downstream drift. | `False` |
+| `business_rule_rejection` | Downstream business logic rejection (`TICKET_CLOSED`, `TICKET_NOT_FOUND`, documented 404 for nonexistent resource). | `False` |
+| `authentication_authorization` | Standard HTTP 401/403 credential or permission rejection without header drift evidence. | `False` |
+| `transient_service_failure` | HTTP 429 rate limit, 500/502/503/504 server error, or network transport failure/socket timeout. | `False` |
+| `ambiguous` | Bare HTTP 400/422 status codes without structured details, unrecognized status codes, or contradictory/malformed evidence. | `False` |
+
+### 6.3 Retry Safety & Invariants (`RetrySafety`)
+- **Uncertain Write Invariant**: If `uncertain_write == True` (e.g. transport disconnect or response parsing failure on a write), `safe_to_retry` is strictly `False`. This protection holds **even if** `diagnosis_eligible == True`.
+- **Pre-Execution Invariant**: If rejected before HTTP dispatch (`PRE_VALIDATION`, `REQUEST_MAPPING`), `safe_to_retry` is `False` with `requires_input_adaptation == True`.
+- **Idempotency Keys**: Supplying an `Idempotency-Key` does **not** prove server-side deduplication; writes with uncertain server outcome are never retried blindly.
 
 ---
 
-## 7. Server-Sent Events (SSE) Contract & Public Examples (For Member 3)
+## 7. Contract Gaps & Coordination Handoffs
+
+### 7.1 For Member 1 (Mock API & Mutations) — Evidence Requirements
+To enable deterministic schema drift classification without inspecting mock admin state or hidden scenario answers:
+1. **Structured Schema Validation Errors**:
+   - Downstream 400/422 validation rejections should include structured keys in response JSON:
+     `{"error": {"category": "schema_mismatch", "details": {"missing": [...], "unexpected": [...]}, "migration_hint": "..."}}`.
+   - Bare 400/422 responses without structured schema details will be safely degraded to `ambiguous`.
+2. **Missing Field vs. Rename Correspondence**:
+   - An observed missing field error (e.g. `missing: ["assignee_id"]`) does **not** alone prove that `user_id` should be renamed to `assignee_id`. Semantic correspondence requires explicit migration hints or diagnostic validation.
+3. **Newly Required Header Signals**:
+   - If a mutation introduces a newly required header, returning `401/422` with `{"error": {"code": "MISSING_HEADER", "details": {"required_headers": ["X-Org-Token"]}}}` allows DriftGuard to classify it as header drift candidate.
+   - Note: DriftGuard will diagnose header structure, but will never fabricate credentials or bypass permissions.
+4. **Idempotency Guarantees**:
+   - Confirm server-side deduplication semantics for `POST /tickets/assign` when `Idempotency-Key` is supplied.
+
+### 7.2 For Member 3 (Frontend & SSE Events) — Representative Event Payloads
+
+#### Representative `tool_call_failed` Event Payload with Classification:
+```json
+{
+  "run_id": "run-48afbc29-7981-420a",
+  "sequence": 4,
+  "timestamp": "2026-10-14T12:00:01.250Z",
+  "mode": "normal",
+  "type": "tool_call_failed",
+  "tool": "assign_ticket",
+  "data": {
+    "status_code": 422,
+    "error_code": "schema_mismatch",
+    "message": "Field 'user_id' is deprecated. Expected 'assignee_id'.",
+    "uncertain_write": false,
+    "classification": {
+      "category": "schema_drift",
+      "diagnosis_eligible": true,
+      "safe_to_retry": false,
+      "retry_reason": "Downstream server rejected the request schema. Repeating identical payload will deterministically fail; input adaptation is required."
+    }
+  }
+}
+```
+
+#### Representative `tool_call_failed` for Ambiguous Bare 422:
+```json
+{
+  "run_id": "run-48afbc29-7981-420a",
+  "sequence": 4,
+  "timestamp": "2026-10-14T12:00:01.120Z",
+  "mode": "normal",
+  "type": "tool_call_failed",
+  "tool": "assign_ticket",
+  "data": {
+    "status_code": 422,
+    "error_code": "UNPROCESSABLE_ENTITY",
+    "message": "Unprocessable entity",
+    "uncertain_write": false,
+    "classification": {
+      "category": "ambiguous",
+      "diagnosis_eligible": false,
+      "safe_to_retry": false,
+      "retry_reason": "Operation cannot be retried safely under category 'ambiguous'."
+    }
+  }
+}
+```
+
+---
+
+## 8. Server-Sent Events (SSE) Contract & Public Examples (For Member 3)
 
 Each event emitted across `/runs/{run_id}/events` strictly conforms to `contracts/events.schema.json`.
 All secrets in `data` are recursively redacted with `[REDACTED]` prior to emission.
