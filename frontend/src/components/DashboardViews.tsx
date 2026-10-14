@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react';
-import type { RepairAttempt, RunEvent, RunSummary, ToolRegistryEntry } from '../types';
+import type { EvidenceLevel, HealingExecution, RepairAttempt, RunEvent, RunSummary, ToolRegistryEntry } from '../types';
 import { DEFAULT_TASK, FIXTURES, MUTATIONS, SAMPLE_REGISTRY, type MutationId } from '../fixtures/scenarios';
-import { candidateState, eventTone, mergeEvents, runOutcome, safeDisplay, safeText, type RunOutcome } from '../state/runState';
+import { candidateState, eventSummary, eventTone, mergeEvents, runOutcome, safeDisplay, safeText, type RunOutcome } from '../state/runState';
 import { summaryOutcome } from '../state/runState';
 import type { StreamStatus } from '../services/eventStream';
 import { currentRunPatch, patchKey } from '../state/patchState';
@@ -24,7 +24,7 @@ function Pill({ tone, children }: { tone: 'blue' | 'amber' | 'green' | 'red' | '
 export function SampleLabel({ source }: { source: DataSource }) {
   return source === 'sample'
     ? <span className="sample-label">Sample data — backend not connected</span>
-    : <span className="live-label">Live backend · connection unverified</span>;
+    : <span className="live-label">Live backend · real API data only</span>;
 }
 
 function JsonDetails({ label, value }: { label: string; value: unknown }) {
@@ -39,10 +39,10 @@ function runTone(outcome: RunOutcome): 'blue' | 'amber' | 'green' | 'red' | 'mut
   return 'muted';
 }
 
-function RunCard({ side, events, selected, source, summary }: { side: 'baseline' | 'healing'; events: RunEvent[]; selected: boolean; source: DataSource; summary: RunSummary | null }) {
+function RunCard({ side, events, selected, source, summary, normalSelected = false }: { side: 'baseline' | 'healing'; events: RunEvent[]; selected: boolean; source: DataSource; summary: RunSummary | null; normalSelected?: boolean }) {
   const outcome = source === 'live' ? summaryOutcome(summary, events) : runOutcome(events);
   const latest = events[events.length - 1];
-  const isNormal = source === 'live' && summary?.execution_type === 'deterministic';
+  const isNormal = source === 'live' && normalSelected;
   return <article className={`run-card ${side}`}>
     <div className="run-card-top"><div><span className="eyebrow">{isNormal ? '01 / deterministic workflow' : side === 'baseline' ? '01 / fixed contract' : '02 / adaptive contract'}</span><h3>{isNormal ? 'Normal workflow' : side === 'baseline' ? 'Baseline' : 'DriftGuard healing'}</h3></div><Pill tone={runTone(outcome)}>{outcomeLabels[outcome]}</Pill></div>
     <p className="run-card-description">{isNormal ? 'Backend deterministic execution with an independent assignee read.' : side === 'baseline' ? 'Original v1 request, with no contract adaptation.' : 'Evidence → candidate → validation → independent verification → commit.'}</p>
@@ -53,7 +53,7 @@ function RunCard({ side, events, selected, source, summary }: { side: 'baseline'
     {selected && events.length > 0 && <>
       {!summary && <div className="run-card-keyline"><span>Run</span><DisplayId id={events[0].run_id} /></div>}
       <div className="run-card-keyline"><span>Events received</span><strong>{events.length}</strong></div>
-      <div className="latest-event"><span className="eyebrow">Latest event</span><strong>{typeof latest?.data.summary === 'string' ? safeText(latest.data.summary) : latest?.type.replace(/_/g, ' ')}</strong></div>
+      <div className="latest-event"><span className="eyebrow">Latest event</span><strong>{latest ? eventSummary(latest) : 'Unavailable'}</strong></div>
       {summary?.error && <p className="inline-error">{safeText(summary.error)}</p>}
     </>}
   </article>;
@@ -67,7 +67,7 @@ function Timeline({ events }: { events: RunEvent[] }) {
       <ol className="event-list">{ordered.map((event) => <li key={`${event.run_id}:${event.sequence}`} className="event-row">
         <span className={`event-marker marker-${eventTone(event.type)}`}>{String(event.sequence).padStart(2, '0')}</span>
         <div className="event-body"><div className="event-top"><strong>{event.type.replace(/_/g, ' ')}</strong><Pill tone={eventTone(event.type)}>{eventTone(event.type) === 'amber' ? 'Diagnosis' : eventTone(event.type) === 'green' ? 'Verified / complete' : eventTone(event.type) === 'red' ? 'Failure / rejection' : 'Execution'}</Pill></div>
-          <p>{typeof event.data.summary === 'string' ? safeText(event.data.summary) : `${event.tool ?? 'Run'} event received.`}</p>
+          <p>{eventSummary(event)}</p>
           <div className="event-meta">#{event.sequence} {event.tool ? `· ${event.tool}` : ''}</div>
           <JsonDetails label="View event JSON" value={event} />
         </div>
@@ -107,14 +107,16 @@ function Verification({ events, source, summary }: { events: RunEvent[]; source:
 }
 
 export interface DemoProps {
-  source: DataSource; task: string; mutation: MutationId; appliedMutation: MutationId | null; busy: boolean; error: string | null;
+  source: DataSource; task: string; mutation: MutationId; appliedMutation: MutationId | null; evidenceLevel: EvidenceLevel; appliedEvidence: EvidenceLevel | null; healingExecution: HealingExecution; busy: boolean; error: string | null;
   streamWarning: string | null; streamStatus: StreamStatus; commandStatus: string | null;
   baselineEvents: RunEvent[]; healingEvents: RunEvent[]; scope: ExecutionScope;
   baselineSummary: RunSummary | null; healingSummary: RunSummary | null;
+  savedBaseline: { summary: RunSummary; events: RunEvent[]; scenario: MutationId } | null;
+  normalSelected: boolean;
   patches: RepairAttempt[];
   tools: ToolRegistryEntry[];
   patchError: string | null; patchLoading: boolean;
-  onTask: (task: string) => void; onMutation: (mutation: MutationId) => void;
+  onTask: (task: string) => void; onMutation: (mutation: MutationId) => void; onEvidence: (level: EvidenceLevel) => void; onHealingExecution: (path: HealingExecution) => void;
   onRun: (scope: Exclude<ExecutionScope, null> | 'normal') => void; onReset: () => void; onApplyMutation: () => void;
 }
 
@@ -122,27 +124,30 @@ export function DemoView(props: DemoProps) {
   const scenario = FIXTURES[props.mutation];
   const unavailable = props.source === 'sample' && !scenario;
   const taskUnsupported = props.source === 'sample' && props.task.trim() !== DEFAULT_TASK;
-  const runDisabled = props.busy || unavailable || taskUnsupported || !props.task.trim() || (props.source === 'live' && props.appliedMutation !== props.mutation);
+  const runDisabled = props.busy || unavailable || taskUnsupported || !props.task.trim() || (props.source === 'live' && (props.appliedMutation !== props.mutation || props.appliedEvidence !== props.evidenceLevel));
   const visibleTimeline = props.healingEvents.length > 0 ? props.healingEvents : props.baselineEvents;
   const verificationEvents = props.healingEvents.length > 0 ? props.healingEvents : props.baselineEvents;
+  const historicalBaseline = props.source === 'live' && props.savedBaseline && (props.scope === null || (props.scope === 'healing' && props.savedBaseline.scenario === props.mutation)) ? props.savedBaseline : null;
   return <div className="tab-content">
     <section className="demo-hero"><div><span className="eyebrow">Genesis 2.0 / Track 2 PS 01</span><h1>Watch a tool contract recover.</h1><p>Follow the same task through a fixed baseline and a guarded repair path. Each result is tied to its own event stream.</p></div><div className="hero-steps"><span>01 Find Maya</span><span>02 Assign ticket 81</span><span>03 Verify assignee</span></div></section>
     <section className="panel controls-panel"><div className="section-heading"><div><span className="eyebrow">Demo controls</span><h2>Run the assignment workflow</h2></div><SampleLabel source={props.source} /></div>
       <div className="control-fields"><label>Agent task<input value={props.task} onChange={(event) => props.onTask(event.target.value)} disabled={props.busy} placeholder={DEFAULT_TASK} /></label><label>Drift scenario<select value={props.mutation} onChange={(event) => props.onMutation(event.target.value as MutationId)} disabled={props.busy}>{MUTATIONS.map((mutation) => <option value={mutation.id} key={mutation.id}>{mutation.label}</option>)}</select></label></div>
+      {props.source === 'live' && <div className="control-fields live-options"><label>Observed API evidence<select value={props.evidenceLevel} onChange={(event) => props.onEvidence(event.target.value as EvidenceLevel)} disabled={props.busy}><option value="ordinary">Ordinary validation response</option><option value="explicit_hint">Explicit migration hint</option></select></label><label>Healing execution path<select value={props.healingExecution} onChange={(event) => props.onHealingExecution(event.target.value as HealingExecution)} disabled={props.busy}><option value="model_driven_healing">Model-driven · provider required</option><option value="deterministic">Deterministic · no model</option></select></label></div>}
       {props.source === 'live' && <p className="notice-line">Reset or apply the selected scenario before a run. The backend has no paired comparison operation; baseline and healing cannot be claimed as a controlled comparison.</p>}
-      <p className="quiet-copy">{props.source === 'live' ? 'Reset restores the downstream demo and active registry, clears this selected run, and preserves persisted audit and metrics history. Reset is disabled while an operation may be active.' : 'Reset clears the current sample playback. Completed sample comparisons remain in the Benchmark tab history.'}</p>
+      <p className="quiet-copy">{props.source === 'live' ? 'Reset restores the downstream demo and active registry, clears this selected run, and preserves a completed baseline in this browser session plus persisted audit and metrics history. Reset is disabled while an operation may be active.' : 'Reset clears the current sample playback. Completed sample comparisons remain in the Benchmark tab history.'}</p>
       {unavailable && <p className="notice-line">No frontend sample exists for this scenario. Choose None, Rename, Combined, or Missing business value.</p>}
       {taskUnsupported && <p className="notice-line">Samples cover only the prefilled Maya → ticket 81 task. Restore that text to run a sample.</p>}
       {scenario && props.source === 'sample' && <p className="scenario-description"><strong>{scenario.title}.</strong> {scenario.description}</p>}
       <p className="scenario-description"><strong>Scenario intent:</strong> {props.mutation === 'none' ? 'ordinary success without drift' : ['missing_business_value', 'unavailable_credential', 'ambiguous_mapping'].includes(props.mutation) ? 'deliberately unsafe change; safe refusal expected' : 'recoverable contract drift'}. This is a scenario classification, not a measured result.</p>
-      <div className="action-row">{props.source === 'live' && <button className="button button-secondary" onClick={() => props.onRun('normal')} disabled={runDisabled}>Run normal</button>}<button className="button button-secondary" onClick={() => props.onRun('baseline')} disabled={runDisabled}>Run baseline</button><button className="button button-secondary" onClick={() => props.onRun('healing')} disabled={runDisabled}>Run healing</button><button className="button button-primary" onClick={() => props.onRun('comparison')} disabled={runDisabled || props.source === 'live'}>Compare both <span aria-hidden="true">↗</span></button>{props.source === 'live' && <button className="button button-secondary" onClick={props.onApplyMutation} disabled={props.busy}>Apply mutation</button>}<button className="button button-ghost" onClick={props.onReset} disabled={props.busy}>{props.source === 'live' ? 'Reset backend' : 'Reset view'}</button></div>
-      {props.source === 'live' && <p className="quiet-copy">Scenario confirmation: {props.appliedMutation === props.mutation ? `${props.mutation} applied` : 'not confirmed'}. Event stream: <span className={`transport transport-${props.streamStatus}`}>{props.streamStatus}</span>.</p>}
+      <div className="action-row">{props.source === 'live' && <button className="button button-secondary" onClick={() => props.onRun('normal')} disabled={runDisabled}>Run normal</button>}<button className="button button-secondary" onClick={() => props.onRun('baseline')} disabled={runDisabled}>Run baseline</button><button className="button button-secondary" onClick={() => props.onRun('healing')} disabled={runDisabled}>{props.source === 'live' && props.healingExecution === 'deterministic' ? 'Run deterministic healing' : 'Run healing'}</button><button className="button button-primary" onClick={() => props.onRun('comparison')} disabled={runDisabled || props.source === 'live'}>Compare both <span aria-hidden="true">↗</span></button>{props.source === 'live' && <button className="button button-secondary" onClick={props.onApplyMutation} disabled={props.busy}>Apply mutation</button>}<button className="button button-ghost" onClick={props.onReset} disabled={props.busy}>{props.source === 'live' ? 'Reset backend' : 'Reset view'}</button></div>
+      {props.source === 'live' && <p className="quiet-copy">Scenario confirmation: {props.appliedMutation === props.mutation && props.appliedEvidence === props.evidenceLevel ? `${props.mutation} · ${props.evidenceLevel.replace('_', ' ')} applied` : 'not confirmed'}. Event stream: <span className={`transport transport-${props.streamStatus}`}>{props.streamStatus}</span>.</p>}
       {props.busy && <p className="notice-line" role="status">{props.source === 'sample' ? 'Playing sample events…' : 'Waiting for backend response and events…'}</p>}
       {props.commandStatus && <p className="success-line" role="status">{props.commandStatus}</p>}
       {props.streamWarning && <p className="notice-line" role="status">{props.streamWarning}</p>}
       {props.error && <p className="error-line" role="alert">{props.error}</p>}
     </section>
-    <div className="run-grid"><RunCard side="baseline" events={props.baselineEvents} selected={props.scope === 'baseline' || props.scope === 'comparison'} source={props.source} summary={props.baselineSummary} /><RunCard side="healing" events={props.healingEvents} selected={props.scope === 'healing' || props.scope === 'comparison'} source={props.source} summary={props.healingSummary} /></div>
+    {props.source === 'live' && props.savedBaseline && <div className="notice-line">Baseline run <DisplayId id={props.savedBaseline.summary.run_id} /> from {props.savedBaseline.scenario} is preserved in this browser session across reset. It is a separate recorded run; the backend does not provide a paired comparison identity or prove equivalent conditions.</div>}
+    <div className="run-grid"><RunCard side="baseline" events={historicalBaseline?.events ?? props.baselineEvents} selected={!!historicalBaseline || props.scope === 'baseline' || props.scope === 'comparison'} source={props.source} summary={historicalBaseline?.summary ?? props.baselineSummary} normalSelected={props.normalSelected} /><RunCard side="healing" events={props.healingEvents} selected={props.scope === 'healing' || props.scope === 'comparison'} source={props.source} summary={props.healingSummary} /></div>
     <div className="detail-grid"><Timeline events={visibleTimeline} /><div className="detail-stack"><RequestComparison mutation={props.mutation} source={props.source} healingEvents={props.healingEvents} healingSummary={props.healingSummary} patches={props.patches} tools={props.tools} patchError={props.patchError} patchLoading={props.patchLoading} /><Verification events={verificationEvents} source={props.source} summary={props.healingSummary ?? props.baselineSummary} /></div></div>
   </div>;
 }

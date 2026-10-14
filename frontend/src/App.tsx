@@ -5,7 +5,7 @@ import { api, ApiError } from './services/api';
 import { RunEventStream, type StreamStatus } from './services/eventStream';
 import { CommandGate } from './state/commandGate';
 import { mergeEvents, runOutcome } from './state/runState';
-import type { CreateRunRequest, RepairAttempt, RunEvent, RunSummary, SystemMetrics, ToolRegistryEntry } from './types';
+import type { CreateRunRequest, EvidenceLevel, HealingExecution, RepairAttempt, RunEvent, RunSummary, SystemMetrics, ToolRegistryEntry } from './types';
 
 type Tab = 'demo' | 'registry' | 'benchmark';
 type LiveAction = 'normal' | 'baseline' | 'healing';
@@ -17,10 +17,15 @@ export default function App() {
   const [task, setTask] = useState(DEFAULT_TASK);
   const [mutation, setMutation] = useState<MutationId>('rename');
   const [appliedMutation, setAppliedMutation] = useState<MutationId | null>(null);
+  const [evidenceLevel, setEvidenceLevel] = useState<EvidenceLevel>('ordinary');
+  const [appliedEvidence, setAppliedEvidence] = useState<EvidenceLevel | null>(null);
+  const [healingExecution, setHealingExecution] = useState<HealingExecution>('model_driven_healing');
   const [scope, setScope] = useState<ExecutionScope>(null);
+  const [normalSelected, setNormalSelected] = useState(false);
   const [baselineEvents, setBaselineEvents] = useState<RunEvent[]>([]);
   const [healingEvents, setHealingEvents] = useState<RunEvent[]>([]);
   const [baselineSummary, setBaselineSummary] = useState<RunSummary | null>(null);
+  const [savedBaseline, setSavedBaseline] = useState<{ summary: RunSummary; events: RunEvent[]; scenario: MutationId } | null>(null);
   const [healingSummary, setHealingSummary] = useState<RunSummary | null>(null);
   const [tools, setTools] = useState<ToolRegistryEntry[]>([]);
   const [patches, setPatches] = useState<RepairAttempt[]>([]);
@@ -75,6 +80,7 @@ export default function App() {
       setMetricsLoading(false);
       if (registry.status === 'rejected' || systemMetrics.status === 'rejected')
         setError('Cannot load live registry or metrics. Check the orchestrator connection or response format.');
+      else setError(null);
     });
     return () => { cancelled = true; };
   }, [source]);
@@ -89,6 +95,7 @@ export default function App() {
     setStreamStatus('disconnected');
     setCommandStatus(null);
     setScope(null);
+    setNormalSelected(false);
     setBaselineEvents([]);
     setHealingEvents([]);
     setBaselineSummary(null);
@@ -99,8 +106,10 @@ export default function App() {
     if (next === source || gateRef.current.locked) return;
     clearView();
     setSource(next);
+    setSavedBaseline(null);
     setMutation(next === 'live' ? 'none' : 'rename');
     setAppliedMutation(null);
+    setAppliedEvidence(null);
     setTools([]);
     setPatches([]); setPatchError(null); setPatchHasMore(false); setPatchOffset(0); setPatchLoading(false);
     setMetrics(null); setMetricsError(null); setMetricsLoading(false);
@@ -166,7 +175,7 @@ export default function App() {
     const side = action === 'healing' ? 'healing' : 'baseline';
     const payload: CreateRunRequest = {
       mode: action === 'normal' ? 'normal' : action,
-      execution_type: action === 'normal' ? 'deterministic' : action === 'baseline' ? 'model_driven_baseline' : 'model_driven_healing',
+      execution_type: action === 'normal' ? 'deterministic' : action === 'baseline' ? 'model_driven_baseline' : healingExecution,
       task: task.trim(), wait: false,
     };
     try {
@@ -257,11 +266,12 @@ export default function App() {
 
   const handleRun = (action: Exclude<ExecutionScope, null> | 'normal') => {
     if (gateRef.current.locked || !task.trim() || (source === 'sample' && (action === 'normal' || task.trim() !== DEFAULT_TASK))) return;
-    if (source === 'live' && (action === 'comparison' || appliedMutation !== mutation)) return;
+    if (source === 'live' && (action === 'comparison' || appliedMutation !== mutation || appliedEvidence !== evidenceLevel)) return;
     clearView();
     if (!gateRef.current.acquire()) return;
     setBusy(true);
     setScope(action === 'normal' ? 'baseline' : action);
+    setNormalSelected(action === 'normal');
     if (source === 'sample') playSample(action as Exclude<ExecutionScope, null>);
     else void runLive(action as LiveAction, generationRef.current);
   };
@@ -276,11 +286,13 @@ export default function App() {
       const result = await api.resetDemo();
       if (generation !== generationRef.current) return;
       if (result.status !== 'reset_completed' || result.mock_api !== 'reset_successful') throw new Error('Backend did not confirm the downstream reset.');
+      if (scope === 'baseline' && baselineSummary && isTerminal(baselineSummary))
+        setSavedBaseline({ summary: baselineSummary, events: baselineEvents, scenario: mutation });
       clearView();
-      setMutation('none'); setAppliedMutation('none'); setCommandStatus('Backend and mock reset confirmed. Persistent audit history remains.');
+      setMutation('none'); setEvidenceLevel('ordinary'); setAppliedMutation('none'); setAppliedEvidence('ordinary'); setCommandStatus('Backend and mock reset confirmed. Persistent audit history remains.');
       await refreshData(generationRef.current);
     } catch (reason) {
-      if (generation === generationRef.current) { setAppliedMutation(null); setError(reason instanceof Error ? reason.message : 'Backend reset failed.'); }
+      if (generation === generationRef.current) { setAppliedMutation(null); setAppliedEvidence(null); setError(reason instanceof Error ? reason.message : 'Backend reset failed.'); }
     } finally { if (generation === generationRef.current) { gateRef.current.release(); setBusy(false); } }
   };
 
@@ -289,18 +301,21 @@ export default function App() {
     setBusy(true); setError(null); setCommandStatus(null);
     const generation = generationRef.current;
     try {
-      const result = await api.setMutation(mutation, mutation !== 'none');
+      const result = await api.setMutation(mutation, mutation !== 'none', evidenceLevel);
       if (generation !== generationRef.current) return;
-      if (result.active_scenario !== mutation || result.enabled !== (mutation !== 'none')) throw new Error('Backend mutation response did not confirm the selected scenario.');
+      if (result.active_scenario !== mutation || result.enabled !== (mutation !== 'none') || result.evidence_level !== evidenceLevel) throw new Error('Backend mutation response did not confirm the selected scenario and evidence level.');
       setAppliedMutation(mutation);
-      setCommandStatus(`Backend confirmed ${mutation} scenario ${result.enabled ? 'enabled' : 'disabled'}.`);
+      setAppliedEvidence(evidenceLevel);
+      setCommandStatus(`Backend confirmed ${mutation} scenario ${result.enabled ? 'enabled' : 'disabled'} with ${evidenceLevel.replace('_', ' ')} evidence.`);
     } catch (reason) {
-      if (generation === generationRef.current) { setAppliedMutation(null); setError(reason instanceof Error ? reason.message : 'Backend mutation failed. Reset the demo before running.'); }
+      if (generation === generationRef.current) { setAppliedMutation(null); setAppliedEvidence(null); setError(reason instanceof Error ? reason.message : 'Backend mutation failed. Reset the demo before running.'); }
     } finally { if (generation === generationRef.current) { gateRef.current.release(); setBusy(false); } }
   };
 
   const handleTaskChange = (value: string) => { if (!gateRef.current.locked) { clearView(); setTask(value); } };
   const handleMutationChange = (value: MutationId) => { if (!gateRef.current.locked) { clearView(); setMutation(value); } };
+  const handleEvidenceChange = (value: EvidenceLevel) => { if (!gateRef.current.locked) { clearView(); setEvidenceLevel(value); } };
+  const handleHealingExecutionChange = (value: HealingExecution) => { if (!gateRef.current.locked) { clearView(); setHealingExecution(value); } };
   const visibleEvents = healingEvents.length ? healingEvents : baselineEvents;
   const currentRunId = healingSummary?.run_id ?? baselineSummary?.run_id ?? visibleEvents[0]?.run_id ?? null;
 
@@ -311,7 +326,7 @@ export default function App() {
       <div className="source-switch" aria-label="Data source"><button className={source === 'sample' ? 'active' : ''} onClick={() => changeSource('sample')} disabled={busy}>Sample</button><button className={source === 'live' ? 'active' : ''} onClick={() => changeSource('live')} disabled={busy}>Live</button></div>
     </div></header>
     <main className="dashboard-main">
-      {tab === 'demo' && <DemoView source={source} task={task} mutation={mutation} appliedMutation={appliedMutation} busy={busy} error={error} streamWarning={streamWarning} streamStatus={streamStatus} commandStatus={commandStatus} baselineEvents={baselineEvents} healingEvents={healingEvents} scope={scope} baselineSummary={baselineSummary} healingSummary={healingSummary} patches={patches} tools={tools} patchError={patchError} patchLoading={patchLoading} onTask={handleTaskChange} onMutation={handleMutationChange} onRun={handleRun} onReset={() => { void handleReset(); }} onApplyMutation={() => { void handleApplyMutation(); }} />}
+      {tab === 'demo' && <DemoView source={source} task={task} mutation={mutation} appliedMutation={appliedMutation} evidenceLevel={evidenceLevel} appliedEvidence={appliedEvidence} healingExecution={healingExecution} busy={busy} error={error} streamWarning={streamWarning} streamStatus={streamStatus} commandStatus={commandStatus} baselineEvents={baselineEvents} healingEvents={healingEvents} scope={scope} normalSelected={normalSelected} baselineSummary={baselineSummary} savedBaseline={savedBaseline} healingSummary={healingSummary} patches={patches} tools={tools} patchError={patchError} patchLoading={patchLoading} onTask={handleTaskChange} onMutation={handleMutationChange} onEvidence={handleEvidenceChange} onHealingExecution={handleHealingExecutionChange} onRun={handleRun} onReset={() => { void handleReset(); }} onApplyMutation={() => { void handleApplyMutation(); }} />}
       {tab === 'registry' && <RegistryAuditView source={source} tools={tools} events={visibleEvents} mutation={mutation} error={error} patches={patches} patchError={patchError} patchLoading={patchLoading} patchHasMore={patchHasMore} currentRunId={currentRunId} onLoadMore={() => { void loadMorePatches(); }} />}
       {tab === 'benchmark' && <BenchmarkView source={source} metrics={metrics} metricsLoading={metricsLoading} metricsError={metricsError} currentRunId={currentRunId} baselineEvents={baselineEvents} healingEvents={healingEvents} sampleHistory={sampleHistory} />}
     </main>

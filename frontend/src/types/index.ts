@@ -121,6 +121,9 @@ export interface MutationResponse {
   description?: string;
 }
 
+export type EvidenceLevel = 'ordinary' | 'explicit_hint';
+export type HealingExecution = 'model_driven_healing' | 'deterministic';
+
 export interface ResetResponse {
   status: 'reset_completed';
   orchestrator: string;

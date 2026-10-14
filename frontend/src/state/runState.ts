@@ -78,3 +78,31 @@ export function safeDisplay(value: unknown): unknown {
 export function safeText(value: unknown): string {
   return String(safeDisplay(value));
 }
+
+/** Short, evidence-based copy for backend events that do not carry a summary. */
+export function eventSummary(event: RunEvent): string {
+  if (typeof event.data.summary === 'string' && event.data.summary.trim()) return safeText(event.data.summary);
+  const args = event.data.arguments && typeof event.data.arguments === 'object' ? event.data.arguments as Record<string, unknown> : {};
+  const tool = event.tool ?? 'tool';
+  switch (event.type) {
+    case 'run_started': return 'Task execution started.';
+    case 'tool_call_started':
+      if (tool === 'find_user') return `Looking up user ${args.name == null ? 'from the task' : safeText(args.name)}.`;
+      if (tool === 'assign_ticket') return `Assigning ticket ${args.ticket_id == null ? 'from the task' : safeText(args.ticket_id)} using the active tool definition.`;
+      if (tool === 'get_ticket') return `Reading ticket ${args.ticket_id == null ? 'from the task' : safeText(args.ticket_id)} to verify the assignee.`;
+      return `Calling ${safeText(tool)}.`;
+    case 'tool_call_failed': return typeof event.data.message === 'string' ? safeText(event.data.message) : `${safeText(tool)} failed${event.data.status_code == null ? '' : ` with HTTP ${safeText(event.data.status_code)}`}.`;
+    case 'diagnosis_started': return `Diagnosing the observed ${safeText(tool)} failure using the available response evidence.`;
+    case 'patch_proposed': return `Candidate patch proposed for ${safeText(tool)}; validation is pending.`;
+    case 'patch_validated': return 'Candidate passed deterministic validation; it is not committed yet.';
+    case 'patch_rejected': {
+      const reasons = event.data.rejection_reasons;
+      return Array.isArray(reasons) && typeof reasons[0] === 'string' ? safeText(reasons[0]) : 'Candidate rejected; active registry unchanged.';
+    }
+    case 'retry_started': return `Retrying ${safeText(tool)} with the validated candidate.`;
+    case 'recovery_verified': return 'Independent business read verified the recovery.';
+    case 'registry_committed': return 'Verified candidate committed to the active registry.';
+    case 'run_completed': return 'Backend completed the task. Check the final verification result.';
+    case 'run_failed': return typeof event.data.reason === 'string' ? safeText(event.data.reason) : 'Backend ended the run without verified completion.';
+  }
+}

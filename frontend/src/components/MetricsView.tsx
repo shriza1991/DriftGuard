@@ -20,7 +20,8 @@ export function BenchmarkView({ source, metrics, metricsLoading, metricsError, c
   const current = live ? currentRunMetric(metrics, currentRunId) : null;
   const baseline = live ? metrics.run_metrics.find((run) => run.execution_type === 'model_driven_baseline') : null;
   const ordinary = live ? metrics.run_metrics.find((run) => run.mode === 'normal' && run.status === 'completed') : null;
-  const diagnosis = current?.mode === 'healing' ? measuredTokens(current.diagnosis_token_usage) : null;
+  const hasObservedDiagnosis = [...baselineEvents, ...healingEvents].some((event) => event.run_id === currentRunId && event.type === 'diagnosis_started');
+  const diagnosis = current?.mode === 'healing' && hasObservedDiagnosis ? measuredTokens(current.diagnosis_token_usage) : null;
   const session = current?.mode === 'healing' ? measuredTokens(current.session_token_usage) : null;
   const baselineTokens = baseline ? measuredTokens(baseline.session_token_usage) : null;
   const ordinaryTokens = ordinary ? measuredTokens(ordinary.session_token_usage) : null;
@@ -52,9 +53,9 @@ export function BenchmarkView({ source, metrics, metricsLoading, metricsError, c
       {source === 'live' && !metrics && !metricsLoading && !metricsError && <div className="empty-panel">No metrics response has been loaded.</div>}
     </section>
     <section className="panel"><div className="section-heading"><div><span className="eyebrow">Per-run measurements</span><h2>Token usage and recovery</h2></div><span className="pill pill-muted">No cross-run totals</span></div>
-      {currentRunId && <p className="run-reference">Selected run <strong>{shortId(currentRunId)}</strong><details><summary>Full run ID</summary><code>{currentRunId}</code></details></p>}
+      {currentRunId && <div className="run-reference">Selected run <strong>{shortId(currentRunId)}</strong><details><summary>Full run ID</summary><code>{currentRunId}</code></details></div>}
       <div className="metric-grid">
-        <Metric label="Current run diagnosis tokens" value={available(diagnosis)} context={current?.mode === 'healing' ? 'Complete measured diagnosis usage only' : 'Select a healing run'} />
+        <Metric label="Current run diagnosis tokens" value={available(diagnosis)} context={hasObservedDiagnosis ? 'Backend-reported complete usage for observed diagnosis' : 'No diagnosis event in the selected run; usage unavailable'} />
         <Metric label="Current healing-session tokens" value={available(session)} context="Agent + diagnosis tokens; complete usage only" />
         <Metric label="Current verified recovery" value={available(current?.recovery_duration_ms, ' ms')} context="Backend measured; verified repairs in selected run" />
         <Metric label="Baseline tokens" value={available(baselineTokens)} context={baseline ? `Latest baseline run on page: ${shortId(baseline.run_id)}` : 'No baseline run on loaded page'} />

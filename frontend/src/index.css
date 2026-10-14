@@ -25,6 +25,7 @@
 .metric-card strong{overflow-wrap:anywhere}.metric-card small{color:#9cb0c8;line-height:1.5;display:block}
 .run-reference{color:#a9bed4;font-size:.8rem}.run-reference strong{color:#e8f3ff}.run-reference details{display:inline-block;margin-left:10px}.run-reference code{display:block;overflow-wrap:anywhere}
 .sample-history{color:#bbcee0;line-height:1.7;padding-left:20px}
+.live-options{margin-top:14px;grid-template-columns:1fr 1fr}
 @media(max-width:1200px){.metric-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:850px){.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.header-inner{gap:12px}}
 @media(max-width:520px){.metric-grid{grid-template-columns:1fr}.source-bar{position:static}.dashboard-header{top:0}.run-card-top{flex-wrap:wrap}.source-inner{letter-spacing:.04em}.brand strong{font-size:1.1rem}}

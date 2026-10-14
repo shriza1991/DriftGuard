@@ -1,4 +1,4 @@
-import type { CreateRunRequest, MutationResponse, PatchPage, ResetResponse, RunSummary, SystemMetrics, ToolRegistryEntry } from '../types';
+import type { CreateRunRequest, EvidenceLevel, MutationResponse, PatchPage, ResetResponse, RunSummary, SystemMetrics, ToolRegistryEntry } from '../types';
 import { parsePatchPage } from '../state/patchState.ts';
 import { parseSystemMetrics } from '../state/metricsState.ts';
 
@@ -10,7 +10,8 @@ export class ApiError extends Error {
 }
 
 export class DriftGuardApiClient {
-  constructor(public readonly base = DEFAULT_BASE, private readonly request = fetch) {}
+  // Wrap the browser function so invoking this.request does not rebind native fetch to the client instance.
+  constructor(public readonly base = DEFAULT_BASE, private readonly request: typeof fetch = (input, init) => fetch(input, init)) {}
 
   private async json<T>(path: string, init?: RequestInit): Promise<T> {
     let response: Response;
@@ -43,8 +44,8 @@ export class DriftGuardApiClient {
   }
   eventUrl(runId: string, cursor?: number): string { return `${this.base}/runs/${encodeURIComponent(runId)}/events${cursor === undefined ? '' : `?cursor=${cursor}`}`; }
   resetDemo(): Promise<ResetResponse> { return this.json('/demo/reset', { method: 'POST' }); }
-  setMutation(scenario: string, enabled = true): Promise<MutationResponse> {
-    return this.json('/demo/mutation', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scenario, enabled, evidence_level: 'ordinary' }) });
+  setMutation(scenario: string, enabled = true, evidenceLevel: EvidenceLevel = 'ordinary'): Promise<MutationResponse> {
+    return this.json('/demo/mutation', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scenario, enabled, evidence_level: evidenceLevel }) });
   }
   async fetchRegistry(): Promise<{ tools: ToolRegistryEntry[]; version: string }> {
     const response = await this.json<{ tools: ToolRegistryEntry[]; version: string }>('/registry');

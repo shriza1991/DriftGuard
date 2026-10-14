@@ -1,7 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { FIXTURES, fixtureEvents } from '../src/fixtures/scenarios.ts';
-import { candidateState, mergeEvents, runOutcome, safeDisplay } from '../src/state/runState.ts';
+import { candidateState, eventSummary, mergeEvents, runOutcome, safeDisplay } from '../src/state/runState.ts';
+
+test('backend events have readable evidence-based summaries without raw JSON', () => {
+  const base = { run_id: 'run-1', sequence: 1, timestamp: '2026-10-14T00:00:00Z', mode: 'healing' as const };
+  assert.equal(eventSummary({ ...base, type: 'tool_call_started', tool: 'assign_ticket', data: { arguments: { ticket_id: 81, user_id: '123' } } }), 'Assigning ticket 81 using the active tool definition.');
+  assert.equal(eventSummary({ ...base, type: 'patch_validated', tool: 'assign_ticket', data: {} }), 'Candidate passed deterministic validation; it is not committed yet.');
+  assert.equal(eventSummary({ ...base, type: 'patch_rejected', tool: 'assign_ticket', data: { rejection_reasons: ['Missing configured credential'] } }), 'Missing configured credential');
+  assert.equal(eventSummary({ ...base, type: 'run_failed', tool: null, data: { reason: 'Could not safely repair' } }), 'Could not safely repair');
+});
 
 test('all four documented fixture scenarios have separate ordered run identities', () => {
   for (const scenario of ['none', 'rename', 'combined', 'missing_business_value'] as const) {

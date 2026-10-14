@@ -36,10 +36,12 @@ test('API client uses prompt run creation, final lookup, mutation and proxy path
   await client.createRun({ mode: 'healing', execution_type: 'model_driven_healing', task: 'task', wait: false });
   await client.getRun(runId);
   await client.setMutation('rename');
+  await client.setMutation('rename', true, 'explicit_hint');
   await client.resetDemo();
-  assert.deepEqual(calls.map(({ url }) => url), ['/api/runs', '/api/runs/run-one', '/api/demo/mutation', '/api/demo/reset']);
+  assert.deepEqual(calls.map(({ url }) => url), ['/api/runs', '/api/runs/run-one', '/api/demo/mutation', '/api/demo/mutation', '/api/demo/reset']);
   assert.deepEqual(JSON.parse(String(calls[0].init?.body)), { mode: 'healing', execution_type: 'model_driven_healing', task: 'task', wait: false });
   assert.deepEqual(JSON.parse(String(calls[2].init?.body)), { scenario: 'rename', enabled: true, evidence_level: 'ordinary' });
+  assert.deepEqual(JSON.parse(String(calls[3].init?.body)), { scenario: 'rename', enabled: true, evidence_level: 'explicit_hint' });
 });
 
 test('SSE parser rejects wrong run, malformed JSON and invalid sequence', () => {
