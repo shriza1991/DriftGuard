@@ -21,7 +21,7 @@ class Ticket(BaseModel):
     title: str
     status: str
     assignee_id: Optional[str] = None
-    history: List[AssignmentHistoryEntry] = []
+    history: List[AssignmentHistoryEntry] = Field(default_factory=list)
 
 
 class AssignTicketRequestV1(BaseModel):
@@ -46,16 +46,13 @@ class AssignTicketResponse(BaseModel):
     idempotent_replayed: bool = False
 
 
-class ValidationErrorDetail(BaseModel):
-    expected_schema: Dict[str, Any]
-    received_payload: Dict[str, Any]
-
-
 class ValidationErrorResponse(BaseModel):
     error: str = "ValidationFailed"
     code: str
     message: str
-    details: Optional[ValidationErrorDetail] = None
+    # Drift failures intentionally carry different structured evidence shapes
+    # (schema, headers, candidate fields). Keep the public error model honest.
+    details: Optional[Dict[str, Any]] = None
     hint: Optional[str] = None
 
 

@@ -1,7 +1,6 @@
 """Mutation manager for Mock API.
 Manages active drift scenarios for evaluation and testing.
 """
-from typing import Optional, Dict, Any, Tuple
 from mock_api.mutations.scenarios import DriftScenario, EvidenceLevel, ScenarioConfig
 
 
@@ -19,14 +18,14 @@ class MutationManager:
         evidence_level: EvidenceLevel = EvidenceLevel.ORDINARY
     ) -> ScenarioConfig:
         hints = {
-            DriftScenario.RENAME: "Field 'user_id' has been renamed to 'assignee_id'.",
+            DriftScenario.RENAME: "Field 'user_id' renamed to 'assignee_id'.",
             DriftScenario.TYPE_CHANGE: "Field 'user_id' expects integer, received string.",
             DriftScenario.NESTING: "Field 'user_id' is now nested under 'target.id'.",
-            DriftScenario.REQUIRED_HEADER: "Missing required header 'X-Agent-Auth: Bearer secret-agent-token'.",
-            DriftScenario.COMBINED: "v2 schema: nested 'target.id' as integer and header 'X-Agent-Auth' required.",
+            DriftScenario.REQUIRED_HEADER: "Missing required header 'Authorization' using the configured credential reference.",
+            DriftScenario.COMBINED: "Field 'user_id' is now nested under 'target.id' as an integer and header 'Authorization' is required.",
             DriftScenario.MISSING_BUSINESS_VALUE: "Field 'priority_tier' is mandatory and missing.",
-            DriftScenario.UNAVAILABLE_CREDENTIAL: "Requires role 'admin-super' token.",
-            DriftScenario.AMBIGUOUS_MAPPING: "Ambiguous assignee: specify 'assignee_user_id' or 'supervisor_id'."
+            DriftScenario.UNAVAILABLE_CREDENTIAL: "Requires unavailable role 'secops-admin'.",
+            DriftScenario.AMBIGUOUS_MAPPING: "Ambiguous assignee: specify 'assignee_user_id' or 'escalation_user_id'."
         }
 
         descriptions = {
@@ -34,7 +33,7 @@ class MutationManager:
             DriftScenario.RENAME: "Renames parameter 'user_id' to 'assignee_id'",
             DriftScenario.TYPE_CHANGE: "Changes 'user_id' type from string to integer",
             DriftScenario.NESTING: "Moves 'user_id' to nested 'target': {'id': ...}",
-            DriftScenario.REQUIRED_HEADER: "Requires 'X-Agent-Auth' authorization header",
+            DriftScenario.REQUIRED_HEADER: "Requires the configured Authorization header",
             DriftScenario.COMBINED: "Combined nesting, integer conversion, and authorization header",
             DriftScenario.MISSING_BUSINESS_VALUE: "Requires unknown 'priority_tier' parameter",
             DriftScenario.UNAVAILABLE_CREDENTIAL: "Requires unavailable secret credential",
