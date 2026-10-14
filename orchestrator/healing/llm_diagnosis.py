@@ -138,10 +138,12 @@ class LLMDiagnoser:
         model: Optional[BaseChatModel] = None,
         timeout_sec: float = 5.0,
         approved_header_credentials: Optional[Dict[str, str]] = None,
+        gateway: Optional[Any] = None,
     ):
         self.model = model
         self.timeout_sec = timeout_sec
         self.approved_header_credentials = approved_header_credentials or {}
+        self.gateway = gateway
 
     async def diagnose(
         self,
@@ -261,7 +263,8 @@ class LLMDiagnoser:
 
         start_time = time.perf_counter()
         try:
-            call_coro = self.model.ainvoke(messages)
+            call_coro = (self.gateway.invoke(self.model, messages, purpose="repair_diagnosis")
+                         if self.gateway is not None else self.model.ainvoke(messages))
             ai_msg: AIMessage = await asyncio.wait_for(call_coro, timeout=effective_timeout)
         except asyncio.TimeoutError:
             return PlanningResult(

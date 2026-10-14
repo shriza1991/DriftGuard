@@ -36,6 +36,8 @@ from orchestrator.execution.tool_executor import ToolExecutor
 from orchestrator.execution.events import event_broadcaster
 from orchestrator.agents.catalogue import get_frozen_v1_catalogue, get_langchain_tool_specs
 from orchestrator.agents.model_provider import create_chat_model, ModelConfigurationError, provider_error_summary
+from orchestrator.agents.model_gateway import ModelGateway, ModelBudgetExhausted, ProviderCooldown
+from orchestrator.agents.workflow_plan import PlanReplayModel, InvalidWorkflowPlan
 from orchestrator.metrics.tracker import metrics_tracker
 from orchestrator.audit.logger import audit_logger
 
@@ -144,10 +146,20 @@ class BaselineAgent:
             )
 
         # 2. Initialize Model (lazy instantiation with explicit error on missing credentials)
+        gateway = None
         try:
-            chat_model = create_chat_model(override_model=override_model or self._model)
+            if override_model is not None or self._model is not None:
+                chat_model = create_chat_model(override_model=override_model or self._model)
+            else:
+                gateway = ModelGateway(run_id)
+                provider_model = gateway.create_model()
+                chat_model = PlanReplayModel(provider_model, gateway, target_user_name, target_ticket)
             model_with_tools = chat_model.bind_tools(get_langchain_tool_specs())
         except ModelConfigurationError as mce:
+            if gateway is not None:
+                run_record["llm_calls"] = gateway.snapshot()
+                run_record["outcome"] = {"llm_calls": run_record["llm_calls"]}
+                await gateway.aclose()
             duration_ms = round((time.perf_counter() - start_perf) * 1000, 2)
             completed_wall = datetime.now(timezone.utc).isoformat()
             run_record["status"] = "failed"
@@ -220,8 +232,8 @@ class BaselineAgent:
                 termination_reason = "deadline_exceeded"
                 break
             except Exception as e:
-                termination_reason = "model_invocation_error"
-                provider_error = provider_error_summary(e)
+                termination_reason = "invalid_workflow_plan" if isinstance(e, InvalidWorkflowPlan) else "model_budget_exhausted" if isinstance(e, ModelBudgetExhausted) else "model_invocation_error"
+                provider_error = str(e) if isinstance(e, (InvalidWorkflowPlan, ModelBudgetExhausted, ProviderCooldown)) else provider_error_summary(e)
                 break
 
             # Aggregate usage metrics truthfully without double-counting
@@ -230,7 +242,9 @@ class BaselineAgent:
                 if hasattr(ai_response, "response_metadata") and isinstance(ai_response.response_metadata, dict)
                 else None
             )
-            if usage and isinstance(usage, dict):
+            if getattr(ai_response, "additional_kwargs", {}).get("local_plan_replay"):
+                pass  # This deterministic step made no model request and reported no provider usage.
+            elif usage and isinstance(usage, dict):
                 raw_in = usage.get("input_tokens", usage.get("prompt_tokens"))
                 raw_out = usage.get("output_tokens", usage.get("completion_tokens"))
                 complete_usage = isinstance(raw_in, int) and isinstance(raw_out, int)
@@ -243,7 +257,7 @@ class BaselineAgent:
                     await self.audit_store.record_model_usage(
                         run_id=run_id,
                         call_id=f"turn-{turn}",
-                        purpose="agent_turn",
+                        purpose="planning" if gateway else "agent_turn",
                         prompt_tokens=raw_in,
                         completion_tokens=raw_out,
                         total_tokens=in_tok + out_tok if complete_usage else None,
@@ -255,7 +269,7 @@ class BaselineAgent:
                     await self.audit_store.record_model_usage(
                         run_id=run_id,
                         call_id=f"turn-{turn}",
-                        purpose="agent_turn",
+                        purpose="planning" if gateway else "agent_turn",
                         prompt_tokens=None,
                         completion_tokens=None,
                         total_tokens=None,
@@ -551,6 +565,9 @@ class BaselineAgent:
             "status": ticket_status or "unverified",
             "uncertain_write": had_uncertain_write,
         }
+        if gateway is not None:
+            outcome["llm_calls"] = gateway.snapshot()
+            run_record["llm_calls"] = outcome["llm_calls"]
 
         if is_verified and termination_reason in ["completed", "model_completed"]:
             termination_reason = "completed_and_verified"
@@ -621,5 +638,8 @@ class BaselineAgent:
                 termination_reason=termination_reason,
                 completed_at=completed_wall,
             )
+
+        if gateway is not None:
+            await gateway.aclose()
 
         return run_record

@@ -50,6 +50,7 @@ def create_chat_model(
     provider: Optional[str] = None,
     model_name: Optional[str] = None,
     api_key: Optional[str] = None,
+    http_async_client: Optional[Any] = None,
 ) -> BaseChatModel:
     """Creates and returns the configured LangChain chat model.
     
@@ -73,7 +74,11 @@ def create_chat_model(
             from langchain_groq import ChatGroq
         except ImportError as exc:
             raise ModelConfigurationError("langchain_groq is not installed. Install the groq extra.") from exc
-        return ChatGroq(model=target_model, api_key=key, temperature=0.0)
+        return ChatGroq(
+            model=target_model, api_key=key, temperature=0.0,
+            max_retries=0, max_tokens=700, timeout=25,
+            http_async_client=http_async_client,
+        )
 
     elif target_provider in ["google_genai", "gemini"]:
         key = (

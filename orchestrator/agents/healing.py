@@ -36,6 +36,8 @@ from orchestrator.execution.tool_executor import ToolExecutor
 from orchestrator.execution.events import event_broadcaster, EventBroadcaster
 from orchestrator.agents.catalogue import get_langchain_tool_specs
 from orchestrator.agents.model_provider import create_chat_model, ModelConfigurationError, provider_error_summary
+from orchestrator.agents.model_gateway import ModelGateway, ModelBudgetExhausted, ProviderCooldown
+from orchestrator.agents.workflow_plan import PlanReplayModel, InvalidWorkflowPlan
 from orchestrator.healing.recovery import RecoveryController, RecoveryResult, RecoveryStatus
 from orchestrator.healing.llm_diagnosis import LLMDiagnoser
 from orchestrator.metrics.tracker import metrics_tracker
@@ -180,10 +182,17 @@ class HealingAgent:
 
         # 2. Resolve or configure ChatModel
         active_model = override_model or self._model
+        gateway = None
         if active_model is None:
             try:
-                active_model = create_chat_model()
+                gateway = ModelGateway(run_id)
+                provider_model = gateway.create_model()
+                active_model = PlanReplayModel(provider_model, gateway, target_user_name, target_ticket)
             except ModelConfigurationError as e:
+                if gateway is not None:
+                    run_record["llm_calls"] = gateway.snapshot()
+                    run_record["outcome"] = {"llm_calls": run_record["llm_calls"]}
+                    await gateway.aclose()
                 duration_ms = round((time.perf_counter() - start_perf) * 1000, 2)
                 err_msg = f"Model configuration error: {e}"
                 event_broadcaster.publish_event(
@@ -226,7 +235,11 @@ class HealingAgent:
             HumanMessage(content=task),
         ]
 
-        if self.recovery_controller.llm_diagnoser is None:
+        if gateway is not None:
+            self.recovery_controller.llm_diagnoser = LLMDiagnoser(
+                model=active_model.provider_model, gateway=gateway,
+                approved_header_credentials=self.approved_header_credentials)
+        elif self.recovery_controller.llm_diagnoser is None:
             self.recovery_controller.llm_diagnoser = LLMDiagnoser(model=active_model, approved_header_credentials=self.approved_header_credentials)
 
         # Ensure recovery controller has active diagnoser model if active_model resolved
@@ -263,8 +276,9 @@ class HealingAgent:
                 termination_reason = "deadline_exceeded"
                 break
             except Exception as e:
-                termination_reason = "model_invocation_error"
-                run_record["error"] = f"Model call failed on turn {turns_executed}: {provider_error_summary(e)}"
+                termination_reason = "invalid_workflow_plan" if isinstance(e, InvalidWorkflowPlan) else "model_budget_exhausted" if isinstance(e, ModelBudgetExhausted) else "model_invocation_error"
+                safe_error = str(e) if isinstance(e, (InvalidWorkflowPlan, ModelBudgetExhausted, ProviderCooldown)) else provider_error_summary(e)
+                run_record["error"] = f"Model planning failed: {safe_error}"
                 break
 
             # Aggregate usage metrics truthfully
@@ -273,7 +287,9 @@ class HealingAgent:
                 if hasattr(ai_response, "response_metadata") and isinstance(ai_response.response_metadata, dict)
                 else None
             )
-            if usage and isinstance(usage, dict):
+            if getattr(ai_response, "additional_kwargs", {}).get("local_plan_replay"):
+                pass  # Deterministic plan replay made no provider request.
+            elif usage and isinstance(usage, dict):
                 raw_in = usage.get("input_tokens", usage.get("prompt_tokens"))
                 raw_out = usage.get("output_tokens", usage.get("completion_tokens"))
                 complete_usage = isinstance(raw_in, int) and isinstance(raw_out, int)
@@ -286,7 +302,7 @@ class HealingAgent:
                     await self.audit_store.record_model_usage(
                         run_id=run_id,
                         call_id=f"turn-{turns_executed}",
-                        purpose="agent_turn",
+                        purpose="planning" if gateway else "agent_turn",
                         prompt_tokens=raw_in,
                         completion_tokens=raw_out,
                         total_tokens=in_tok + out_tok if complete_usage else None,
@@ -298,7 +314,7 @@ class HealingAgent:
                     await self.audit_store.record_model_usage(
                         run_id=run_id,
                         call_id=f"turn-{turns_executed}",
-                        purpose="agent_turn",
+                        purpose="planning" if gateway else "agent_turn",
                         prompt_tokens=None,
                         completion_tokens=None,
                         total_tokens=None,
@@ -623,6 +639,9 @@ class HealingAgent:
             "had_uncertain_write": had_uncertain_write,
             "tool_calls": recorded_tool_calls,
         }
+        if gateway is not None:
+            final_outcome["llm_calls"] = gateway.snapshot()
+            run_record["llm_calls"] = final_outcome["llm_calls"]
 
         run_record["completed_at"] = datetime.now(timezone.utc).isoformat()
         run_record["duration_ms"] = duration_ms
@@ -645,6 +664,7 @@ class HealingAgent:
                     "verified_assignee_id": verified_assignee,
                     "recovered_calls": len(recovered_tool_calls),
                     "model_usage": token_usage_dict,
+                    "llm_calls": final_outcome.get("llm_calls"),
                 },
             )
             metrics_tracker.record_run(mode="healing", success=True, duration_ms=duration_ms)
@@ -668,6 +688,7 @@ class HealingAgent:
                     "termination_reason": termination_reason,
                     "downstream_verified": downstream_verified,
                     "model_usage": token_usage_dict,
+                    "llm_calls": final_outcome.get("llm_calls"),
                 },
             )
             metrics_tracker.record_run(mode="healing", success=False, duration_ms=duration_ms)
@@ -690,5 +711,8 @@ class HealingAgent:
                 termination_reason=termination_reason,
                 completed_at=run_record["completed_at"],
             )
+
+        if gateway is not None:
+            await gateway.aclose()
 
         return run_record

@@ -456,6 +456,8 @@ class ToolExecutor:
 
         # 7. Safe Network Execution via Injectable Business Client
         try:
+            from orchestrator.agents.model_gateway import RunCallBudget
+            RunCallBudget.record_tool_api_call_if_budgeted(context.run_id)
             response = await self.client._client.request(
                 method=method,
                 url=url_path,

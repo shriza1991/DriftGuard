@@ -68,6 +68,7 @@ class RunSummaryResponse(BaseModel):
     outcome: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     model_usage: Optional[Dict[str, Any]] = None
+    llm_calls: Optional[Dict[str, Any]] = None
     termination_reason: Optional[str] = None
     execution_type: Optional[str] = None
     audit_status: str = "complete"
@@ -298,7 +299,11 @@ async def get_run_status(run_id: str, req: Request):
     """Retrieves status and outcome of an execution run (in-memory or persistent SQLite audit)."""
     run = workflow_manager.get_run(run_id)
     if run:
-        return RunSummaryResponse(**run)
+        response = RunSummaryResponse(**run)
+        if response.execution_type in ("model_driven_baseline", "model_driven_healing") and response.llm_calls is None:
+            from orchestrator.agents.model_gateway import RunCallBudget
+            response.llm_calls = RunCallBudget.existing_snapshot(run_id)
+        return response
 
     audit_store = getattr(req.app.state, "audit_store", None)
     if audit_store:
@@ -313,6 +318,7 @@ async def get_run_status(run_id: str, req: Request):
                 completed_at=persisted.completed_at,
                 duration_ms=persisted.duration_ms,
                 outcome=persisted.verified_outcome,
+                llm_calls=(persisted.verified_outcome or {}).get("llm_calls"),
                 error=persisted.error,
                 termination_reason=persisted.termination_reason,
                 execution_type=persisted.execution_type,

@@ -50,6 +50,7 @@ function RunCard({ side, events, selected, source, summary, normalSelected = fal
     {selected && events.length === 0 && <div className="empty-inline">Waiting for {source === 'sample' ? 'sample playback' : 'backend events'}…</div>}
     {selected && summary && <div className="run-card-keyline"><span>Run ID</span><DisplayId id={summary.run_id} /></div>}
     {selected && summary && <div className="run-card-keyline"><span>Authoritative status</span><strong>{summary.status}</strong></div>}
+    {selected && source === 'live' && summary && <div className="run-card-keyline"><span>LLM API attempts</span><strong>{summary.llm_calls && Number.isInteger(summary.llm_calls.outbound_attempts) ? `${summary.llm_calls.outbound_attempts} / ${summary.llm_calls.limit}` : 'Unavailable'}</strong></div>}
     {selected && events.length > 0 && <>
       {!summary && <div className="run-card-keyline"><span>Run</span><DisplayId id={events[0].run_id} /></div>}
       <div className="run-card-keyline"><span>Events received</span><strong>{events.length}</strong></div>

@@ -102,6 +102,7 @@ export interface RunSummary {
   outcome: Record<string, unknown> | null;
   error: string | null;
   model_usage: Record<string, unknown> | null;
+  llm_calls?: { outbound_attempts: number; limit: number; logical_invocations: number; successful_responses: number; failed_attempts: number; http_429_responses: number; tool_api_calls: number; token_usage: unknown } | null;
   termination_reason: string | null;
   execution_type: string | null;
   audit_status: string;
