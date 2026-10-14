@@ -18,7 +18,7 @@ class MutationManager:
         evidence_level: EvidenceLevel = EvidenceLevel.ORDINARY
     ) -> ScenarioConfig:
         hints = {
-            DriftScenario.RENAME: "Field 'user_id' has been renamed to 'assignee_id'.",
+            DriftScenario.RENAME: "Field 'user_id' renamed to 'assignee_id'.",
             DriftScenario.TYPE_CHANGE: "Field 'user_id' expects integer, received string.",
             DriftScenario.NESTING: "Field 'user_id' is now nested under 'target.id'.",
             DriftScenario.REQUIRED_HEADER: "Missing required header 'Authorization' using the configured credential reference.",
