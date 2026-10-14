@@ -139,6 +139,7 @@ class BenchmarkRunner:
         orchestrator_client: Optional[httpx.AsyncClient] = None,
         mock_admin_client: Optional[httpx.AsyncClient] = None,
         timeout_seconds: float = 60.0,
+        poll_interval_seconds: float = 0.5,
     ) -> None:
         self.orchestrator_url = orchestrator_url.rstrip("/")
         self.mock_api_url = mock_api_url.rstrip("/")
@@ -148,6 +149,34 @@ class BenchmarkRunner:
         self._orchestrator_client = orchestrator_client
         self._mock_admin_client = mock_admin_client
         self.timeout_seconds = timeout_seconds
+        self.poll_interval_seconds = poll_interval_seconds
+
+    async def _wait_for_terminal_run(
+        self,
+        orchestrator: httpx.AsyncClient,
+        initial_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Poll an asynchronously-created run until it reaches a terminal state."""
+        run_id = initial_payload.get("run_id")
+        if not run_id or initial_payload.get("status") in {"completed", "failed", "interrupted"}:
+            return initial_payload
+
+        deadline = asyncio.get_running_loop().time() + self.timeout_seconds
+        latest = initial_payload
+        while latest.get("status") not in {"completed", "failed", "interrupted"}:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                request = httpx.Request("GET", f"{self.orchestrator_url}/runs/{run_id}")
+                raise httpx.ReadTimeout(
+                    f"Run '{run_id}' did not reach a terminal state within "
+                    f"{self.timeout_seconds:.1f} seconds",
+                    request=request,
+                )
+            await asyncio.sleep(min(self.poll_interval_seconds, remaining))
+            response = await orchestrator.get(f"/runs/{run_id}")
+            response.raise_for_status()
+            latest = response.json()
+        return latest
 
     async def _initialize_database(self) -> None:
         path = Path(self.database_path)
@@ -370,6 +399,7 @@ class BenchmarkRunner:
                 )
                 response.raise_for_status()
                 run_payload = response.json()
+                run_payload = await self._wait_for_terminal_run(orchestrator, run_payload)
             except (httpx.HTTPError, ValueError) as exc:
                 raise BenchmarkStageError("run_execution", exc) from exc
         except BenchmarkStageError as exc:
@@ -417,22 +447,24 @@ class BenchmarkRunner:
             and final_assignee is None
             and intended_effect_count == 0
         )
+        terminal_statuses = {"completed", "failed", "interrupted"}
         event_evidence = await self._collect_event_evidence(
-            orchestrator, run_payload.get("run_id")
+            orchestrator,
+            run_payload.get("run_id") if run_payload.get("status") in terminal_statuses else None,
         )
         usage = run_payload.get("model_usage")
         run_status = run_payload.get("status")
-        if not run_status:
-            if isinstance(caught_exception, httpx.TimeoutException):
-                run_status = "timed_out"
-            elif failure_stage == "run_execution":
+        if isinstance(caught_exception, httpx.TimeoutException):
+            run_status = "timed_out"
+        elif not run_status:
+            if failure_stage == "run_execution":
                 run_status = "run_request_failed"
             elif failure_stage:
                 run_status = "setup_failed"
             else:
                 run_status = "unknown"
         execution_completed = bool(
-            run_payload.get("run_id") and run_status in {"completed", "failed"}
+            run_payload.get("run_id") and run_status in terminal_statuses
         )
         expected_outcome_met = bool(
             mode == "healing" and (verified or safe_refusal)

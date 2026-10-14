@@ -216,6 +216,77 @@ async def test_benchmark_runner_executes_paired_trials_and_persists_results(tmp_
 
 
 @pytest.mark.asyncio
+async def test_benchmark_runner_polls_async_runs_to_terminal_state(tmp_path):
+    state = {"assignee_id": None, "history": [], "mode": None, "polls": 0}
+
+    def mock_api_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/admin/mutation":
+            return httpx.Response(200, json={"active_scenario": "rename", "enabled": True})
+        if request.url.path == "/admin/state":
+            return httpx.Response(
+                200,
+                json={
+                    "tickets": {
+                        "81": {
+                            "id": 81,
+                            "status": "assigned" if state["assignee_id"] else "open",
+                            "assignee_id": state["assignee_id"],
+                            "history": list(state["history"]),
+                        }
+                    }
+                },
+            )
+        return httpx.Response(404)
+
+    def orchestrator_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/demo/reset":
+            state.update(assignee_id=None, history=[], polls=0)
+            return httpx.Response(200, json={"mock_api": "reset_successful"})
+        if request.url.path == "/registry":
+            return httpx.Response(
+                200, json={"tools": [{"name": "assign_ticket", "version": "1.0.0"}]}
+            )
+        if request.url.path == "/runs" and request.method == "POST":
+            state["mode"] = json.loads(request.content)["mode"]
+            return httpx.Response(200, json={"run_id": "run-async", "status": "running"})
+        if request.url.path == "/runs/run-async" and request.method == "GET":
+            state["polls"] += 1
+            if state["mode"] == "healing":
+                state["assignee_id"] = "123"
+                state["history"] = [{"action": "assigned", "assignee_id": "123"}]
+                return httpx.Response(200, json={"run_id": "run-async", "status": "completed"})
+            return httpx.Response(200, json={"run_id": "run-async", "status": "failed"})
+        if request.url.path == "/runs/run-async/events":
+            return httpx.Response(200, text="")
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(orchestrator_handler), base_url="http://orchestrator"
+    ) as orchestrator_client, httpx.AsyncClient(
+        transport=httpx.MockTransport(mock_api_handler), base_url="http://mock"
+    ) as mock_client:
+        runner = BenchmarkRunner(
+            database_path=str(tmp_path / "async-evaluation.sqlite3"),
+            orchestrator_client=orchestrator_client,
+            mock_admin_client=mock_client,
+            poll_interval_seconds=0,
+        )
+        result = await runner.run_benchmarks(
+            BenchmarkRunRequest(
+                scenarios=["rename"],
+                evidence_levels=["explicit_hint"],
+                trials_per_scenario=1,
+            )
+        )
+
+    assert state["polls"] == 1
+    assert result.status == "completed"
+    assert result.execution_completed is True
+    assert result.verified_recoveries == 1
+    assert [record.run_status for record in result.trials] == ["failed", "completed"]
+
+
+@pytest.mark.asyncio
 async def test_benchmark_runner_preserves_empty_timeout_error_and_reports_partial(tmp_path):
     def mock_api_handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/admin/mutation":
