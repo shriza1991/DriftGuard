@@ -184,22 +184,90 @@ result = await executor.execute(
 
 ---
 
-## 5. Contract Gaps & Coordination Handoffs
+## 5. Model-Driven Baseline Agent Integration (Member 2 Task 4)
 
-### 5.1 For Member 1 (Mock API & Mutations)
-1. **Idempotency Key Header**: Confirmed that `POST /tickets/assign` accepts and checks `Idempotency-Key` header. Any unassigned endpoints should specify whether idempotency headers are supported.
-2. **User Search Query**: `GET /users?name=Maya` currently returns a JSON list. Note that returning an empty list `[]` triggers safe `USER_NOT_FOUND` refusal, while returning multiple users triggers `AMBIGUOUS_USER_RESOLUTION` refusal.
-3. **Missing Auth Header Status**: Confirm whether future mutation scenarios return `401 Unauthorized` or `422 Unprocessable Content` when `Authorization` is omitted. Both are handled safely by `MockBusinessApiClient`.
+### 5.1 Architecture & Invariants
+- **Genuine Tool Calling**: Driven by LangChain tool-calling agents (`google_genai` or `openai`).
+- **Frozen Catalogue Isolation**: Derives tool specifications and candidate snapshots exclusively from `orchestrator/agents/catalogue.py` (`get_frozen_v1_catalogue()`). Commits or proposals in `VersionedToolRegistry` **never** alter baseline schemas or behavior.
+- **Execution Limits**: Bound by configurable limits: `max_turns` (default: 5), `max_tool_calls` (default: 10), and overall deadline `timeout_seconds` (default: 30.0s).
+- **Operation Identity**: Writes (`POST /tickets/assign`) compute a stable idempotency key mapped to `tool_name` + canonical sorted JSON arguments, preventing duplicate write side-effects within a task run.
+- **Truthful Token Tracking**: Aggregates input, output, and total tokens from model metadata without double counting. If unavailable from the provider, explicitly sets `"unavailable"` (never synthesizes token counts). Baseline diagnosis tokens are strictly `0`.
+- **Independent Verification Over Model Claims**: Completion is independently verified by reading downstream state via `get_ticket(81)` and matching `actual_assignee == resolved_user_id`. Model claims of "done" without matching downstream state are marked as `verification_failed`.
 
-### 5.2 For Member 3 (Frontend & SSE Events)
-1. **Deterministic Execution Tag**: All normal baseline workflow runs emit `data.execution_type = "deterministic_normal_workflow"` in `run_started`.
-2. **Tool Call Metadata**: `tool_call_started` events now include `tool_call_id`, `tool_version`, and canonical `fingerprint`.
-3. **Tool Call Failure Metadata**: `tool_call_failed` events include `status_code`, `error_code`, `message`, and `uncertain_write` flag.
-4. **Read Verification Output**: `run_completed` and `run_failed` include structured `outcome` showing `target_user_name`, `resolved_user_id`, `verified_assignee_id`, and boolean `verified`.
+### 5.2 Invocation & Run Request Contract (For Member 1 & Evaluation)
+Triggering a baseline model run:
+```http
+POST /runs HTTP/1.1
+Content-Type: application/json
+
+{
+  "mode": "baseline",
+  "execution_type": "model_driven_baseline",
+  "task": "Find Maya's user ID, assign ticket 81 to her, and confirm the updated assignee.",
+  "limits": {
+    "max_turns": 5,
+    "max_tool_calls": 10,
+    "timeout_seconds": 30.0
+  }
+}
+```
+
+Response payload (`RunSummaryResponse`):
+```json
+{
+  "run_id": "run-48afbc29-7981-420a",
+  "status": "completed",
+  "mode": "normal",
+  "execution_type": "model_driven_baseline",
+  "task": "Find Maya's user ID, assign ticket 81 to her, and confirm the updated assignee.",
+  "created_at": "2026-10-14T12:00:00Z",
+  "completed_at": "2026-10-14T12:00:02Z",
+  "duration_ms": 1420.5,
+  "outcome": {
+    "ticket_id": 81,
+    "target_user_name": "Maya",
+    "resolved_user_id": "123",
+    "verified_assignee_id": "123",
+    "verified": true,
+    "execution_type": "model_driven_baseline",
+    "status": "assigned",
+    "uncertain_write": false
+  },
+  "error": null,
+  "model_usage": {
+    "input_tokens": 320,
+    "output_tokens": 75,
+    "total_tokens": 395,
+    "diagnosis_tokens": 0,
+    "model_name": "gemini-2.5-flash",
+    "provider": "google_genai"
+  },
+  "termination_reason": "completed_and_verified"
+}
+```
 
 ---
 
-## 6. Server-Sent Events (SSE) Contract & Public Examples (For Member 3)
+## 6. Contract Gaps & Coordination Handoffs
+
+### 6.1 For Member 1 (Mock API & Mutations)
+1. **Idempotency Key Header**: Confirmed that `POST /tickets/assign` accepts and checks `Idempotency-Key` header. Any unassigned endpoints should specify whether idempotency headers are supported.
+2. **User Search Query**: `GET /users?name=Maya` currently returns a JSON list. Note that returning an empty list `[]` triggers safe `USER_NOT_FOUND` refusal, while returning multiple users triggers `AMBIGUOUS_USER_RESOLUTION` refusal.
+3. **Missing Auth Header Status**: Confirm whether future mutation scenarios return `401 Unauthorized` or `422 Unprocessable Content` when `Authorization` is omitted. Both are handled safely by `MockBusinessApiClient`.
+4. **Baseline Invocation Interface**: Use `POST /runs` with `execution_type="model_driven_baseline"` for benchmarking without healing.
+
+### 6.2 For Member 3 (Frontend & SSE Events)
+1. **Execution Type Tags**:
+   - `data.execution_type = "model_driven_baseline"`: Emitted for genuine model-driven baseline runs.
+   - `data.execution_type = "deterministic_normal_workflow"`: Emitted for deterministic script runs.
+2. **Tool Call Metadata**: `tool_call_started` events include `tool_call_id`, `tool_version`, and canonical `fingerprint`.
+3. **Tool Call Failure Metadata**: `tool_call_failed` events include `status_code`, `error_code`, `message`, and `uncertain_write` flag.
+4. **Read Verification Output**: `run_completed` and `run_failed` include structured `outcome` showing `target_user_name`, `resolved_user_id`, `verified_assignee_id`, and boolean `verified`.
+5. **Usage & Termination Fields**: `run_completed` and `run_failed` include `model_usage` (`input_tokens`, `output_tokens`, `total_tokens`, `diagnosis_tokens`) and `termination_reason` (`completed_and_verified`, `verification_failed`, `max_turns_exceeded`, `deadline_exceeded`).
+
+---
+
+## 7. Server-Sent Events (SSE) Contract & Public Examples (For Member 3)
 
 Each event emitted across `/runs/{run_id}/events` strictly conforms to `contracts/events.schema.json`.
 All secrets in `data` are recursively redacted with `[REDACTED]` prior to emission.
@@ -213,4 +281,5 @@ All secrets in `data` are recursively redacted with `[REDACTED]` prior to emissi
   - `tool_call_failed` &rarr; `diagnosis_started` &rarr; `patch_proposed` &rarr; `patch_rejected` (invariant violation) &rarr; `run_failed`.
 - **Terminal Status Summaries**: [`contracts/examples/run_events_terminal_status.json`](file:///contracts/examples/run_events_terminal_status.json)
   - Demonstrates terminal payloads for both completed and failed runs with duration and outcome metrics.
+
 

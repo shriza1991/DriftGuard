@@ -24,6 +24,10 @@ class CreateRunRequest(BaseModel):
         default="Find Maya's user ID, assign ticket 81 to her, and confirm the updated assignee.",
         description="Target user task"
     )
+    execution_type: Optional[str] = Field(
+        default=None,
+        description="'model_driven_baseline' or 'deterministic'"
+    )
 
 
 class RunSummaryResponse(BaseModel):
@@ -36,24 +40,40 @@ class RunSummaryResponse(BaseModel):
     duration_ms: Optional[float] = None
     outcome: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    model_usage: Optional[Dict[str, Any]] = None
+    termination_reason: Optional[str] = None
+    execution_type: Optional[str] = None
 
 
 @router.post("/runs", response_model=RunSummaryResponse, status_code=status.HTTP_200_OK)
 async def create_run(request: CreateRunRequest, req: Request):
     """Triggers an agent workflow run.
-    In normal mode: executes Find Maya -> Assign 81 -> Verify via get_ticket.
-    In healing mode: executes until failure, where healing is explicitly reported as pending.
+    - If execution_type == 'model_driven_baseline' or mode == 'baseline':
+      Executes genuine LangChain tool-calling baseline agent against frozen v1 contracts.
+    - Otherwise:
+      Executes deterministic normal workflow.
     """
     run_id = f"run-{uuid.uuid4().hex[:8]}"
     app_registry = getattr(req.app.state, "registry", None)
     app_client = getattr(req.app.state, "mock_client", None)
-    result = await workflow_manager.execute_workflow(
-        run_id=run_id,
-        mode=request.mode,
-        task=request.task,
-        registry=app_registry,
-        client=app_client,
-    )
+
+    if request.execution_type == "model_driven_baseline" or request.mode == "baseline":
+        from orchestrator.agents.baseline import BaselineAgent
+        agent = BaselineAgent(client=app_client)
+        result = await agent.execute_workflow(
+            run_id=run_id,
+            task=request.task,
+            client=app_client,
+        )
+        workflow_manager._runs_store[run_id] = result
+    else:
+        result = await workflow_manager.execute_workflow(
+            run_id=run_id,
+            mode=request.mode,
+            task=request.task,
+            registry=app_registry,
+            client=app_client,
+        )
     return RunSummaryResponse(**result)
 
 

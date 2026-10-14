@@ -592,13 +592,14 @@ class ToolExecutor:
                     val = extract_json_path(json_path, body)
                     mapped_outcome[out_key] = val
             except MappingError as me:
+                known_sec_list = [auth_token] if auth_token else None
                 failure = SanitizedFailure(
                     is_drift=False,
                     error_code="RESPONSE_MAPPING_ERROR",
                     message=f"Response mapping failed for '{snapshot.name}': {str(me)}",
                     http_status=response.status_code,
-                    normalized_errors={"mapping_error": str(me), "response": redact_secrets(body)},
-                    raw_details=redact_secrets(body if isinstance(body, dict) else {"raw": body}),
+                    normalized_errors={"mapping_error": str(me), "response": redact_secrets(body, known_secrets=known_sec_list)},
+                    raw_details=redact_secrets(body if isinstance(body, dict) else {"raw": body}, known_secrets=known_sec_list),
                     migration_hint=None,
                     tool_name=snapshot.name,
                     endpoint=url_path,
@@ -624,8 +625,9 @@ class ToolExecutor:
             mapped_outcome = body if isinstance(body, dict) else {"result": body}
 
         # Redact secrets before returning
-        clean_outcome = redact_secrets(mapped_outcome)
-        clean_raw = redact_secrets(body if isinstance(body, dict) else {"result": body})
+        known_sec_list = [auth_token] if auth_token else None
+        clean_outcome = redact_secrets(mapped_outcome, known_secrets=known_sec_list)
+        clean_raw = redact_secrets(body if isinstance(body, dict) else {"result": body}, known_secrets=known_sec_list)
 
         return ExecutionResult(
             is_success=True,

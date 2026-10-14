@@ -75,6 +75,16 @@
 - **Decision**: The failure is flagged with `uncertain_write = True`, and the executor strictly performs ZERO automatic retries.
 - **Rationale**: Blind retries against stateful mutating endpoints risk duplicating operations or corrupting data. Safe recovery requires explicit read verification prior to any retried write.
 
+## ADR-016: Immutable Frozen v1 Baseline Catalogue
+- **Context**: The healing registry dynamically stages and hot-commits updated tool definitions (e.g. v1.1.0, v2.0.0). If the baseline agent reads from the mutable registry, its behavior and failure benchmarks would change whenever healing commits a patch.
+- **Decision**: The baseline agent operates strictly against a frozen canonical v1 catalogue (`orchestrator/agents/catalogue.py`), derived directly from the canonical v1 specifications. Commits or candidate stagings in `VersionedToolRegistry` never mutate baseline schemas, tool specifications, or execution snapshots.
+- **Rationale**: Scientific baseline comparison requires an immutable reference point. A baseline that mutates across runs cannot benchmark unhealed failure rates.
+
+## ADR-017: Independent Verification Over Model Done Claims and Truthful Usage
+- **Context**: LLMs can hallucinate success, emitting conversational messages like "Ticket 81 has been successfully assigned to Maya" even when the downstream API rejected the assignment or was never called.
+- **Decision**: The baseline agent never accepts model claims as proof of completion. It derives business intent from trusted inputs and genuine tool call evidence, then independently queries `GET /tickets/81` to verify `actual_assignee == resolved_user_id`. A final "done" response without matching downstream state is strictly flagged as a `verification_failed` failure. Real provider token counts are aggregated without double-counting; missing usage is recorded as `"unavailable"`, and baseline diagnosis tokens are strictly 0.
+- **Rationale**: Prevents false-positive success reporting and guarantees truthful, auditable evaluation metrics.
+
 ---
 
 ## Technical Clarifications & Invariant Reminders
@@ -84,3 +94,4 @@
 > 1. `expected_schema` alone in an error response does **not** establish semantic field correspondence (e.g. that `assignee_id` corresponds to `user_id`).
 > 2. An HTTP `401 Unauthorized` or `422 Unprocessable Content` status alone does **not** prove contract drift (it may indicate genuine authorization failure or bad caller intent).
 > 3. Classification, diagnosis, and transformation inference remain explicitly pending for future tasks and must not be assumed during registry operations.
+

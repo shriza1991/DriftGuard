@@ -108,13 +108,21 @@
 
 ---
 
-## 4. Next Tasks
+- [x] **Task 4: Genuine Fixed-Registry Baseline Agent (`orchestrator/agents/`)**:
+  - `orchestrator/agents/catalogue.py`: Canonical immutable frozen v1 baseline catalogue (`get_frozen_v1_catalogue()`) and LangChain tool schemas (`get_langchain_tool_specs()`), completely isolated from active mutable registry commits.
+  - `orchestrator/agents/model_provider.py`: Lazy model provider initialization with clear `ModelConfigurationError` when API keys are missing, preserving non-blocking orchestrator startup.
+  - `orchestrator/agents/baseline.py`: Genuine LangChain tool-calling baseline agent (`BaselineAgent`). Model selects tools and arguments; tool execution executes through `ToolExecutor` and injected `MockBusinessApiClient`.
+  - Finite Execution Bounds: Enforces configurable `max_turns` (5), `max_tool_calls` (10), and deadline `timeout_seconds` (30s).
+  - Write Operation Identity: Stable `Idempotency-Key` computation mapped across identical write intents.
+  - Rejection of Unknown / Invalid Calls: Rejects uncatalogued tools or schema violations without downstream HTTP calls.
+  - Independent Read Verification: Extracts target ticket ID and user from task inputs and genuine directory evidence, and queries `GET /tickets/81` to verify `actual_assignee == resolved_user_id`. Never trusts conversational model "done" claims alone.
+  - Truthful Token Usage: Aggregates real provider tokens without double-counting; missing usage marked as `"unavailable"`, diagnosis tokens strictly `0`.
+  - API Route Integration: `POST /runs` accepts `execution_type="model_driven_baseline"`, emitting contract-compliant SSE events and returning `RunSummaryResponse`.
+  - Targeted Test Suite (`tests/healing/test_baseline_agent.py`): 13 comprehensive unit tests validating paired tool call IDs, catalogue immutability across registry commits, zero-HTTP invalid call rejection, independent read verification, false-claim rejection, drift failure without patching, write idempotency, uncertain write handling, finite limits, truthful usage tracking, and configuration error handling.
 
-- [ ] **Task 4: Genuine Fixed-Registry Baseline Agent (`orchestrator/agents/baseline.py`)**:
-  - Implement the genuine fixed-registry LLM-driven baseline agent using LangChain tool calling against the frozen v1 registry.
-  - Observe standard tool failure when drift mutations are introduced in downstream endpoints.
-  - Emit contract-compliant run events (`run_started`, `tool_call_started`, `tool_call_failed`, `run_failed`).
-  - Demonstrate deterministic baseline failure under schema drift without healing.
+---
+
+## 4. Next Tasks
 
 - [ ] **Task 5: Failure Classification & Diagnostic Engine (`orchestrator/healing/diagnosis.py`)**:
   - Distinguish transient failures (5xx, 429) from contract drift (400, 401, 422).

@@ -103,7 +103,7 @@ def extract_json_path(path: str, data: Any, default: Any = None) -> Any:
             if not isinstance(curr, dict):
                 raise MappingError(f"Expected dict for key '.{dot_key}' in '{path}', got {type(curr).__name__}")
             if dot_key not in curr:
-                return default
+                raise MappingError(f"Required key '{dot_key}' not found in response for mapping '{path}'")
             curr = curr[dot_key]
         elif idx_str is not None:
             idx = int(idx_str)
@@ -116,7 +116,7 @@ def extract_json_path(path: str, data: Any, default: Any = None) -> Any:
             if not isinstance(curr, dict):
                 raise MappingError(f"Expected dict for key ['{bracket_key}'] in '{path}', got {type(curr).__name__}")
             if bracket_key not in curr:
-                return default
+                raise MappingError(f"Required key ['{bracket_key}'] not found in response for mapping '{path}'")
             curr = curr[bracket_key]
         
         pos = m.end()

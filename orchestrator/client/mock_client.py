@@ -27,19 +27,55 @@ from orchestrator.models import (
 CredentialResolver = Callable[[str], Optional[str]]
 
 
-def redact_secrets(data: Any) -> Any:
-    """Recursively redacts sensitive keys such as authorization tokens or API keys."""
+LEGITIMATE_KEY_ALLOWLIST = {
+    "idempotency_key",
+    "idempotency-key",
+    "ticket_id",
+    "user_id",
+    "assignee_id",
+    "key_id",
+}
+
+SENSITIVE_KEY_SUBSTRINGS = [
+    "auth",
+    "token",
+    "secret",
+    "password",
+    "credential",
+    "api_key",
+    "apikey",
+]
+
+
+def redact_secrets(data: Any, known_secrets: Optional[List[str]] = None) -> Any:
+    """Recursively redacts sensitive keys and known/embedded secret strings while preserving legitimate business fields."""
+    import re
+
     if isinstance(data, dict):
         redacted = {}
         for k, v in data.items():
             k_lower = str(k).lower()
-            if any(s in k_lower for s in ["auth", "token", "secret", "password", "key", "credential"]):
+            # Preserve legitimate business identity fields
+            if k_lower in LEGITIMATE_KEY_ALLOWLIST:
+                redacted[k] = redact_secrets(v, known_secrets=known_secrets)
+            elif any(s in k_lower for s in SENSITIVE_KEY_SUBSTRINGS):
                 redacted[k] = "[REDACTED]"
             else:
-                redacted[k] = redact_secrets(v)
+                redacted[k] = redact_secrets(v, known_secrets=known_secrets)
         return redacted
     elif isinstance(data, list):
-        return [redact_secrets(item) for item in data]
+        return [redact_secrets(item, known_secrets=known_secrets) for item in data]
+    elif isinstance(data, str):
+        val = data
+        # Redact specific known secret values embedded in strings
+        if known_secrets:
+            for s in known_secrets:
+                if s and len(s) >= 4 and s in val:
+                    val = val.replace(s, "[REDACTED]")
+        # Redact standard bearer tokens and credential headers embedded in strings
+        val = re.sub(r"(Bearer\s+)[A-Za-z0-9_\-\.]+", r"\1[REDACTED]", val)
+        val = re.sub(r"((?:api[_-]?key|secret|token|password)\s*[:=]\s*)[A-Za-z0-9_\-\.]+", r"\1[REDACTED]", val, flags=re.IGNORECASE)
+        return val
     return data
 
 
@@ -114,10 +150,21 @@ class MockBusinessApiClient:
         hint: Optional[str] = None
 
         if isinstance(response_data, dict):
-            code = response_data.get("code") or response_data.get("error") or code
-            message = response_data.get("message") or response_data.get("detail") or message
-            details = response_data.get("details") or {}
-            hint = response_data.get("hint")
+            err_field = response_data.get("error")
+            if isinstance(err_field, dict):
+                code = str(err_field.get("code") or err_field.get("category") or code)
+                message = str(err_field.get("message") or err_field.get("detail") or message)
+                if isinstance(err_field.get("details"), dict):
+                    details = err_field.get("details")
+                hint = err_field.get("hint") or hint
+            elif isinstance(err_field, str):
+                code = err_field
+
+            code = str(response_data.get("code") or code)
+            message = str(response_data.get("message") or response_data.get("detail") or message)
+            if isinstance(response_data.get("details"), dict):
+                details = response_data.get("details")
+            hint = response_data.get("hint") or hint
 
         is_drift = status_code in [400, 422] or code in [
             "SCHEMA_MISMATCH",
