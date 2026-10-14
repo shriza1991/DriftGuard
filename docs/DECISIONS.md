@@ -55,6 +55,26 @@
 - **Decision**: The registry uses `AsyncRLock` keyed to `asyncio.current_task()`. Calling nested registry operations from the task already holding the lock succeeds re-entrantly. Different tools use independent locks and run concurrently without contention.
 - **Rationale**: Guarantees concurrency safety while preventing task self-deadlocks.
 
+## ADR-012: Pre-HTTP JSON Schema Validation
+- **Context**: If an agent produces arguments that fail the tool's declared JSON Schema, should an HTTP request still be sent to the downstream service?
+- **Decision**: `ToolExecutor` strictly validates caller arguments against the captured snapshot's `argument_schema` before ANY HTTP call. Invalid arguments immediately produce a `VALIDATION_FAILURE` with zero network requests.
+- **Rationale**: Eliminates unnecessary network load, prevents downstream error pollution, and protects against malformed writes.
+
+## ADR-013: Deterministic Safe Request/Response Mapping without Eval
+- **Context**: Mapping arguments into HTTP parameters and extracting responses into outcomes could be implemented using dynamic evaluation (e.g. Python `eval()` or JMESPath expression execution).
+- **Decision**: Mappings are executed through a pure recursive dictionary/list tree traversal with exact type preservation (integers stay integers) and tokenized JSONPath extraction (`$[0].id`, `$.ticket_id`). Executable code evaluation is strictly forbidden.
+- **Rationale**: Prevents remote code execution (RCE) vulnerabilities and guarantees deterministic, reproducible argument translation.
+
+## ADR-014: Independent Assignee Read Verification Over HTTP 200 Trust
+- **Context**: A downstream write endpoint (`POST /tickets/assign`) might return HTTP 200 OK without actually updating state (e.g. silent discard, async queue failure, or no-op assignment).
+- **Decision**: The normal workflow and future recovery workflows never declare success based on HTTP 200 alone. Step 3 (`get_ticket`) reads ticket state and verifies `actual_assignee_id == intended_user_id` and `actual_ticket_id == 81`.
+- **Rationale**: Guards against false-positive success reporting and verifies true business intent achievement.
+
+## ADR-015: Write Uncertainty Flagging Without Retries on Post-Write Response Failure
+- **Context**: If a downstream write returns an unparseable response (e.g. non-JSON proxy error) or suffers a transport disconnect after sending the request, the state of the write is unknown.
+- **Decision**: The failure is flagged with `uncertain_write = True`, and the executor strictly performs ZERO automatic retries.
+- **Rationale**: Blind retries against stateful mutating endpoints risk duplicating operations or corrupting data. Safe recovery requires explicit read verification prior to any retried write.
+
 ---
 
 ## Technical Clarifications & Invariant Reminders

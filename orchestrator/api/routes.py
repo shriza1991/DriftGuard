@@ -39,16 +39,20 @@ class RunSummaryResponse(BaseModel):
 
 
 @router.post("/runs", response_model=RunSummaryResponse, status_code=status.HTTP_200_OK)
-async def create_run(request: CreateRunRequest):
+async def create_run(request: CreateRunRequest, req: Request):
     """Triggers an agent workflow run.
     In normal mode: executes Find Maya -> Assign 81 -> Verify via get_ticket.
     In healing mode: executes until failure, where healing is explicitly reported as pending.
     """
     run_id = f"run-{uuid.uuid4().hex[:8]}"
+    app_registry = getattr(req.app.state, "registry", None)
+    app_client = getattr(req.app.state, "mock_client", None)
     result = await workflow_manager.execute_workflow(
         run_id=run_id,
         mode=request.mode,
-        task=request.task
+        task=request.task,
+        registry=app_registry,
+        client=app_client,
     )
     return RunSummaryResponse(**result)
 
@@ -109,9 +113,9 @@ async def get_run_events_stream(run_id: str, request: Request):
 
 
 @router.get("/registry", response_model=RegistryResponse)
-async def get_registry():
+async def get_registry(req: Request):
     """Returns all registered active tool entries, schemas, methods and fingerprints."""
-    registry = workflow_manager.get_registry()
+    registry = getattr(req.app.state, "registry", None) or workflow_manager.get_registry()
     from datetime import datetime, timezone
     return RegistryResponse(
         tools=registry.list_active(),

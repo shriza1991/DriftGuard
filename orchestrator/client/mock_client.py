@@ -335,92 +335,23 @@ class MockBusinessApiClient:
         arguments: Dict[str, Any],
         idempotency_key: Optional[str] = None
     ) -> ExecutionResult:
-        """Generic execution adhering to ToolDefinition contract."""
-        started_at = datetime.now(timezone.utc).isoformat()
-        start_t = time.perf_counter()
+        """Generic execution adhering to ToolDefinition contract and registry mappings."""
+        from orchestrator.execution.tool_executor import ToolExecutor
+        from orchestrator.models import ExecutionContext
 
-        url_path = tool.endpoint
-        method = tool.method.upper()
-        headers = dict(tool.headers)
-
-        if method == "POST" and not idempotency_key:
-            idempotency_key = f"dg-idemp-{uuid.uuid4().hex[:12]}"
-        if idempotency_key:
-            headers["Idempotency-Key"] = idempotency_key
-
-        if tool.credential_reference:
-            resolved = self.credential_resolver(tool.credential_reference)
-            if resolved:
-                headers["Authorization"] = f"Bearer {resolved}"
-
-        params = {}
-        json_body = None
-
-        if method == "GET":
-            if "{" in url_path:
-                for k, v in arguments.items():
-                    url_path = url_path.replace(f"{{{k}}}", str(v))
-            else:
-                params = arguments
-        elif method == "POST":
-            json_body = arguments
-
-        try:
-            response = await self._client.request(
-                method=method,
-                url=url_path,
-                params=params if method == "GET" else None,
-                json=json_body if method == "POST" else None,
-                headers=headers
-            )
-        except httpx.RequestError as exc:
-            duration_ms = round((time.perf_counter() - start_t) * 1000, 2)
-            completed_at = datetime.now(timezone.utc).isoformat()
-            failure = SanitizedFailure(
-                is_drift=False,
-                error_code="NETWORK_ERROR",
-                message=f"Request to {url_path} failed: {str(exc)}",
-                http_status=503,
-                normalized_errors={"network_error": str(exc)},
-                raw_details={"error": str(exc)},
-                migration_hint=None,
-                tool_name=tool.name,
-                endpoint=url_path,
-                timestamp=completed_at,
-                registry_version=tool.version
-            )
-            raise MockApiClientError(failure)
-
-        duration_ms = round((time.perf_counter() - start_t) * 1000, 2)
-        completed_at = datetime.now(timezone.utc).isoformat()
-        timing = TimingInfo(started_at=started_at, completed_at=completed_at, duration_ms=duration_ms)
-        identity = OperationIdentity(
-            tool_name=tool.name,
-            endpoint=url_path,
-            method=method,
+        executor = ToolExecutor(client=self)
+        context = ExecutionContext(
+            run_id=f"run-{uuid.uuid4().hex[:8]}",
             idempotency_key=idempotency_key
         )
-
-        try:
-            body = response.json()
-        except Exception:
-            body = {"raw": response.text}
-
-        if response.status_code >= 400:
-            failure = self._normalize_failure(response.status_code, body, tool.name, url_path, tool.version)
-            raise MockApiClientError(failure)
-
-        return ExecutionResult(
-            is_success=True,
-            outcome=body,
-            http_status=response.status_code,
-            normalized_result=body,
-            normalized_errors=None,
-            failure=None,
-            registry_version=tool.version,
-            timing=timing,
-            operation_identity=identity
+        result = await executor.execute(
+            tool_name_or_def=tool,
+            arguments=arguments,
+            context=context
         )
+        if not result.is_success and result.failure:
+            raise MockApiClientError(result.failure)
+        return result
 
 
 class MockAdminApiClient:

@@ -75,37 +75,69 @@
 - [x] **Targeted Test Suite (`tests/healing/test_versioned_registry.py`)**:
   - 11 comprehensive test cases validating entries, defensive copies, stage/discard isolation, monotonic commits, stale proposal rejection, deterministic fingerprints, concurrent commits, re-entrant locking, and endpoint sanitation.
 
+### Task 3: Normal Tool Execution (`orchestrator/execution/`)
+- [x] **Shared Registry & Client Injection**:
+  - Injected `VersionedToolRegistry` and `MockBusinessApiClient` into workflows and FastAPI endpoints (`/runs`, `/registry`) without per-run resets.
+  - Committed registry definitions persist across successive runs.
+- [x] **Defensive Snapshot & Staged Candidate Support**:
+  - Single defensive snapshot captured per invocation, ensuring consistent schema, mappings, version, and SHA-256 fingerprint throughout execution.
+  - Supports explicit candidate snapshot execution without activating or altering registry state.
+- [x] **Safe Registry-Driven Executor (`orchestrator/execution/tool_executor.py`)**:
+  - Deep-copies input arguments for caller immutability.
+  - Pre-HTTP JSON Schema Draft 7 argument validation guaranteeing **zero** network requests on schema rejection.
+  - Resolves credentials via `CredentialResolver` prior to network dispatch (**zero** network requests on missing credentials).
+  - Recursively scrubs secrets (`auth`, `token`, `secret`, `key`, `password`, `credential`) from all outcomes, exceptions, and event payloads.
+- [x] **Pure Deterministic Mapping Engine (`orchestrator/execution/mapping.py`)**:
+  - Evaluates `path_params`, `query_params`, `headers`, and `body` without `eval` or dynamic code execution.
+  - Strict type preservation for arguments (e.g. integer `81` remains integer `81` without string coercion).
+  - Explicit rejection of unsupported mapping keys.
+- [x] **Logical Execution Identity & Idempotency**:
+  - Carries `run_id`, `tool_call_id`, and stable `idempotency_key` on `OperationIdentity` and `ExecutionContext`.
+  - Replays of the same logical operation preserve `Idempotency-Key`; distinct operations receive distinct UUIDs. Never conflates `run_id` with write idempotency.
+- [x] **Normalized Outcome & Categorized Failure Semantics**:
+  - Categorizes failures cleanly: `VALIDATION_FAILURE`, `CREDENTIAL_FAILURE`, `TRANSPORT_FAILURE`, `HTTP_REJECTION`, `RESPONSE_PARSING_FAILURE`.
+  - Tokenized JSONPath response extraction (`$[0].id`, `$.ticket_id`).
+  - Flags `uncertain_write = True` on transport or response parsing failures following a mutation write, preventing dangerous automatic retries.
+  - Preserves structured HTTP evidence without prematurely classifying as drift (classification deferred to Task 5).
+- [x] **Deterministic 3-Tool Workflow Verification (`orchestrator/execution/workflow.py`)**:
+  - Sequence: `find_user` &rarr; `assign_ticket` &rarr; `get_ticket`.
+  - Ambiguity guards: halts immediately on 0 or >1 user directory matches before mutating ticket state.
+  - Independent read verification: compares actual `assignee_id` against intended user ID. Never declares success on HTTP 200 alone.
+- [x] **Targeted Test Suite (`tests/healing/test_tool_execution.py`)**:
+  - 13 comprehensive tests covering zero-HTTP schema rejection, argument immutability, mapping verification, candidate isolation, type preservation, credential fail-fast, idempotency preservation, response parsing, write uncertainty, verification mismatch rejection, ambiguity handling, and shared registry persistence.
+
 ---
 
 ## 4. Next Tasks
 
-- [ ] **Task 3: Normal Tool Execution (`orchestrator/execution/`)**:
-  - Wire normal workflow execution to resolve tools from `VersionedToolRegistry` and dispatch calls via `MockBusinessApiClient`.
-  - Ensure end-to-end execution of `find_user` &rarr; `assign_ticket` &rarr; `get_ticket` passes deterministically.
-  - Maintain event sequence emission with timing and identity metadata.
+- [ ] **Task 4: Genuine Fixed-Registry Baseline Agent (`orchestrator/agents/baseline.py`)**:
+  - Implement the genuine fixed-registry LLM-driven baseline agent using LangChain tool calling against the frozen v1 registry.
+  - Observe standard tool failure when drift mutations are introduced in downstream endpoints.
+  - Emit contract-compliant run events (`run_started`, `tool_call_started`, `tool_call_failed`, `run_failed`).
+  - Demonstrate deterministic baseline failure under schema drift without healing.
 
-- [ ] **Task 4: Failure Classification & Diagnostic Engine (`orchestrator/healing/`)**:
+- [ ] **Task 5: Failure Classification & Diagnostic Engine (`orchestrator/healing/diagnosis.py`)**:
   - Distinguish transient failures (5xx, 429) from contract drift (400, 401, 422).
   - Extract failure signals from structured HTTP response bodies and status codes.
-  - Apply deterministic heuristic rules first (e.g. rename matching, type coercion).
+  - Apply deterministic heuristic rules first (rename matching, type coercion, unnesting).
   - Fallback to LLM-assisted repair planning with strict prompt constraints.
 
-- [ ] **Task 5: Safety Validation & Invariants**:
+- [ ] **Task 6: Safety Validation & Invariants (`orchestrator/healing/validator.py`)**:
   - Verify proposed patch does not invent new business arguments (e.g. `priority_tier`).
   - Verify no lossy conversions or unapproved domain redirects.
   - Keep caller arguments immutable.
 
-- [ ] **Task 6: Staged Patch & Verified Execution**:
+- [ ] **Task 7: Staged Patch & Verified Execution (`orchestrator/healing/recovery.py`)**:
   - Stage the proposed patch in memory with per-tool lock.
   - Execute exactly ONE retry call with idempotency key.
   - If retry succeeds, perform independent read verification via `GET /tickets/81`.
   - Discard candidate patch if retry or read verification fails.
 
-- [ ] **Task 7: Registry Hot-Commit & Second-Call Reuse**:
+- [ ] **Task 8: Registry Hot-Commit & Second-Call Reuse**:
   - Hot-commit verified patch into active tool registry.
   - Verify that subsequent calls to `assign_ticket` in future runs automatically reuse the updated contract without reparsing or re-diagnosing.
 
-- [ ] **Task 8: Audit & Token Tracking**:
+- [ ] **Task 9: Audit & Token Tracking**:
   - Log every diagnosis step and patch commit into `orchestrator/audit/logger.py`.
   - Track real model tokens used during repair planning.
 

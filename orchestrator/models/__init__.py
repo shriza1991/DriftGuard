@@ -94,11 +94,30 @@ class RegistryResponse(BaseModel):
     updated_at: str
 
 
+class FailureCategory(str, Enum):
+    VALIDATION_FAILURE = "validation_failure"
+    CREDENTIAL_FAILURE = "credential_failure"
+    TRANSPORT_FAILURE = "transport_failure"
+    HTTP_REJECTION = "http_rejection"
+    RESPONSE_PARSING_FAILURE = "response_parsing_failure"
+
+
+class ExecutionContext(BaseModel):
+    """Contextual metadata and execution identity for a logical tool call or workflow."""
+    run_id: str
+    tool_call_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
+    candidate_snapshot: Optional[ToolDefinition] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
 class OperationIdentity(BaseModel):
     tool_name: str
     endpoint: str
     method: str
     idempotency_key: Optional[str] = None
+    tool_call_id: Optional[str] = None
+    run_id: Optional[str] = None
 
 
 class TimingInfo(BaseModel):
@@ -109,7 +128,7 @@ class TimingInfo(BaseModel):
 
 class SanitizedFailure(BaseModel):
     """Normalized and secret-redacted failure representation preserving structured validation evidence."""
-    is_drift: bool
+    is_drift: bool = False
     error_code: str
     message: str
     http_status: int
@@ -120,6 +139,8 @@ class SanitizedFailure(BaseModel):
     endpoint: str
     timestamp: str
     registry_version: str = "1.0.0"
+    failure_category: Optional[FailureCategory] = None
+    uncertain_write: bool = False
 
 
 class ExecutionResult(BaseModel):
@@ -128,9 +149,11 @@ class ExecutionResult(BaseModel):
     outcome: Optional[Dict[str, Any]] = None
     http_status: int
     normalized_result: Optional[Dict[str, Any]] = None
+    raw_response: Optional[Any] = None
     normalized_errors: Optional[Dict[str, Any]] = None
     failure: Optional[SanitizedFailure] = None
     registry_version: str = "1.0.0"
+    fingerprint: str = ""
     timing: TimingInfo
     operation_identity: OperationIdentity
 
