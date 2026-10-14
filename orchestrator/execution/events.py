@@ -1,20 +1,10 @@
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
-from pydantic import BaseModel, Field
 import json
 import asyncio
 import jsonschema
 from pathlib import Path
-
-
-class RunEvent(BaseModel):
-    run_id: str
-    sequence: int
-    timestamp: str
-    mode: str  # "normal" | "healing"
-    type: str
-    tool: Optional[str] = None
-    data: Dict[str, Any] = Field(default_factory=dict)
+from orchestrator.models import RunEvent, RunEventType
 
 
 def redact_secrets(data: Any) -> Any:

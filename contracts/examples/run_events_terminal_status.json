@@ -1,0 +1,39 @@
+[
+  {
+    "run_id": "run-term-success-001",
+    "sequence": 5,
+    "timestamp": "2026-10-14T12:00:00.300Z",
+    "mode": "normal",
+    "type": "run_completed",
+    "tool": null,
+    "data": {
+      "status": "completed",
+      "duration_ms": 300.0,
+      "outcome": {
+        "ticket_id": 81,
+        "target_user_name": "Maya",
+        "resolved_user_id": "123",
+        "verified_assignee_id": "123",
+        "verified": true,
+        "status": "assigned"
+      }
+    }
+  },
+  {
+    "run_id": "run-term-failure-002",
+    "sequence": 5,
+    "timestamp": "2026-10-14T12:00:00.320Z",
+    "mode": "normal",
+    "type": "run_failed",
+    "tool": null,
+    "data": {
+      "status": "failed",
+      "duration_ms": 320.0,
+      "reason": "Downstream endpoint /tickets/assign returned HTTP 422: SCHEMA_MISMATCH",
+      "error": {
+        "code": "SCHEMA_MISMATCH",
+        "message": "Field 'user_id' renamed to 'assignee_id'"
+      }
+    }
+  }
+]

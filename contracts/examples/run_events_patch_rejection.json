@@ -1,0 +1,95 @@
+[
+  {
+    "run_id": "run-reject-001",
+    "sequence": 1,
+    "timestamp": "2026-10-14T12:00:00.000Z",
+    "mode": "healing",
+    "type": "run_started",
+    "tool": null,
+    "data": {
+      "task": "Find Maya's user ID, assign ticket 81 to her, and confirm the updated assignee."
+    }
+  },
+  {
+    "run_id": "run-reject-001",
+    "sequence": 2,
+    "timestamp": "2026-10-14T12:00:00.150Z",
+    "mode": "healing",
+    "type": "tool_call_started",
+    "tool": "assign_ticket",
+    "data": {
+      "arguments": {
+        "ticket_id": 81,
+        "user_id": "123"
+      }
+    }
+  },
+  {
+    "run_id": "run-reject-001",
+    "sequence": 3,
+    "timestamp": "2026-10-14T12:00:00.220Z",
+    "mode": "healing",
+    "type": "tool_call_failed",
+    "tool": "assign_ticket",
+    "data": {
+      "status_code": 422,
+      "error": {
+        "error": "ValidationFailed",
+        "code": "MISSING_BUSINESS_VALUE",
+        "message": "Required business context 'priority_tier' missing from payload"
+      }
+    }
+  },
+  {
+    "run_id": "run-reject-001",
+    "sequence": 4,
+    "timestamp": "2026-10-14T12:00:00.240Z",
+    "mode": "healing",
+    "type": "diagnosis_started",
+    "tool": "assign_ticket",
+    "data": {
+      "observed_status": 422,
+      "observed_code": "MISSING_BUSINESS_VALUE"
+    }
+  },
+  {
+    "run_id": "run-reject-001",
+    "sequence": 5,
+    "timestamp": "2026-10-14T12:00:00.310Z",
+    "mode": "healing",
+    "type": "patch_proposed",
+    "tool": "assign_ticket",
+    "data": {
+      "proposal_id": "prop-synth-001",
+      "synthesized_argument": {
+        "priority_tier": "HIGH"
+      }
+    }
+  },
+  {
+    "run_id": "run-reject-001",
+    "sequence": 6,
+    "timestamp": "2026-10-14T12:00:00.330Z",
+    "mode": "healing",
+    "type": "patch_rejected",
+    "tool": "assign_ticket",
+    "data": {
+      "proposal_id": "prop-synth-001",
+      "reasons": [
+        "Safety invariant violation: agent cannot invent business parameter 'priority_tier' not provided in user task."
+      ]
+    }
+  },
+  {
+    "run_id": "run-reject-001",
+    "sequence": 7,
+    "timestamp": "2026-10-14T12:00:00.350Z",
+    "mode": "healing",
+    "type": "run_failed",
+    "tool": "assign_ticket",
+    "data": {
+      "reason": "Safe refusal: missing business parameter cannot be autonomously synthesized without human operator.",
+      "duration_ms": 350.0
+    }
+  }
+]

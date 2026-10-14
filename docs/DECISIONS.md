@@ -24,3 +24,18 @@
 - **Context**: In hackathon prototypes, it is tempting to hardcode 99.8% recovery rates or synthetic token charts.
 - **Decision**: All metrics endpoints and UI cards report strictly measured runtime values (`healing_trials: 0`, `token_usage: "unavailable"` in scaffolding). Unimplemented features must return explicit typed stubs.
 - **Rationale**: Adheres to the Genesis Hackathon PS01 integrity bar and transparent engineering.
+
+## ADR-006: Dedicated Pure-Business Client Segregation
+- **Context**: Having admin methods (`reset`, `mutation`, `state`) on the downstream client risks accidental use by orchestrator agents or healers.
+- **Decision**: `MockBusinessApiClient` implements solely business endpoints (`find_user`, `assign_ticket`, `get_ticket`, `execute_tool`). Admin methods are segregated into a separate `MockAdminApiClient` used strictly by test harnesses and manual reset endpoints.
+- **Rationale**: Enforces the architectural isolation boundary at compile/type level.
+
+## ADR-007: Preservation of Structured Validation Evidence in SanitizedFailure
+- **Context**: Standard HTTP clients discard response JSON bodies when raising exceptions.
+- **Decision**: `MockApiClientError` wraps `SanitizedFailure`, which preserves structured downstream validation evidence (`expected_schema`, `received_payload`, `code`, `hint`), while recursively scrubbing sensitive credentials (`auth`, `token`, `secret`, `password`, `key`).
+- **Rationale**: Autonomous healing depends on diagnostic evidence while maintaining strict data security.
+
+## ADR-008: Non-Blocking Lifespan and Dependency Injection
+- **Context**: In production, downstream services may not be available at orchestrator startup.
+- **Decision**: The orchestrator lifespan initializes client connection pools with finite timeouts and does not execute network or LLM calls during startup. Custom `httpx.AsyncBaseTransport` can be injected for offline deterministic testing.
+- **Rationale**: Ensures fast, deterministic container and test startup with zero network flakiness.

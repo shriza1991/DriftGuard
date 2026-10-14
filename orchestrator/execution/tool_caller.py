@@ -1,7 +1,10 @@
+"""HTTP tool caller adapting ToolDefinition to downstream execution.
+Uses injectable MockBusinessApiClient and normalizes failures.
+"""
+from typing import Dict, Any, Optional
 import uuid
-from typing import Dict, Any, Tuple, Optional
-import httpx
-from orchestrator.registry.models import ToolRegistryEntry
+from orchestrator.models import ToolDefinition
+from orchestrator.client.mock_client import MockBusinessApiClient, MockApiClientError
 from orchestrator.config import settings
 
 
@@ -13,69 +16,39 @@ class ToolExecutionError(Exception):
 
 
 class HttpToolCaller:
-    """Executes downstream HTTP requests defined by ToolRegistryEntry."""
-    def __init__(self, base_url: Optional[str] = None):
-        self.base_url = (base_url or settings.mock_api_url).rstrip("/")
+    """Executes downstream HTTP requests defined by ToolDefinition using MockBusinessApiClient."""
+    def __init__(self, client: Optional[MockBusinessApiClient] = None, base_url: Optional[str] = None):
+        if client is not None:
+            self._client = client
+            self._owns_client = False
+        else:
+            self._client = MockBusinessApiClient(base_url=base_url or settings.mock_api_url)
+            self._owns_client = True
+
+    async def aclose(self):
+        if self._owns_client:
+            await self._client.aclose()
 
     async def call_tool(
         self,
-        tool: ToolRegistryEntry,
+        tool: ToolDefinition,
         arguments: Dict[str, Any],
         idempotency_key: Optional[str] = None
     ) -> Dict[str, Any]:
-        url = f"{self.base_url}{tool.endpoint}"
-        method = tool.method.upper()
-        headers = dict(tool.headers)
-
-        if method == "POST" and not idempotency_key:
-            idempotency_key = f"driftguard-{uuid.uuid4().hex[:12]}"
-        
-        if idempotency_key:
-            headers["Idempotency-Key"] = idempotency_key
-
-        params = {}
-        json_body = None
-
-        if method == "GET":
-            # Apply query params or path params
-            if "{" in url:
-                for k, v in arguments.items():
-                    url = url.replace(f"{{{k}}}", str(v))
-            else:
-                params = arguments
-        elif method == "POST":
-            # Standard POST body from arguments
-            json_body = arguments
-
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            try:
-                response = await client.request(
-                    method=method,
-                    url=url,
-                    params=params if method == "GET" else None,
-                    json=json_body if method == "POST" else None,
-                    headers=headers
-                )
-            except httpx.RequestError as exc:
-                raise ToolExecutionError(
-                    message=f"Network error connecting to downstream service: {str(exc)}",
-                    status_code=503,
-                    response_data={"error": "NetworkError", "details": str(exc)}
-                )
-
-            try:
-                data = response.json()
-            except Exception:
-                data = {"raw_text": response.text}
-
-            if response.status_code >= 400:
-                raise ToolExecutionError(
-                    message=f"Downstream service returned HTTP {response.status_code}",
-                    status_code=response.status_code,
-                    response_data=data
-                )
-
-            return data
+        """Executes tool via MockBusinessApiClient and returns raw response body dict."""
+        try:
+            result = await self._client.execute_tool(
+                tool=tool,
+                arguments=arguments,
+                idempotency_key=idempotency_key
+            )
+            return result.outcome if result.outcome is not None else {}
+        except MockApiClientError as err:
+            raise ToolExecutionError(
+                message=err.failure.message,
+                status_code=err.failure.http_status,
+                response_data=err.failure.raw_details
+            )
 
 
 http_tool_caller = HttpToolCaller()

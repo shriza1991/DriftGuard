@@ -1,0 +1,78 @@
+[
+  {
+    "run_id": "run-fail-001",
+    "sequence": 1,
+    "timestamp": "2026-10-14T12:00:00.000Z",
+    "mode": "normal",
+    "type": "run_started",
+    "tool": null,
+    "data": {
+      "task": "Find Maya's user ID, assign ticket 81 to her, and confirm the updated assignee."
+    }
+  },
+  {
+    "run_id": "run-fail-001",
+    "sequence": 2,
+    "timestamp": "2026-10-14T12:00:00.120Z",
+    "mode": "normal",
+    "type": "tool_call_started",
+    "tool": "find_user",
+    "data": {
+      "arguments": {
+        "name": "Maya"
+      }
+    }
+  },
+  {
+    "run_id": "run-fail-001",
+    "sequence": 3,
+    "timestamp": "2026-10-14T12:00:00.180Z",
+    "mode": "normal",
+    "type": "tool_call_started",
+    "tool": "assign_ticket",
+    "data": {
+      "arguments": {
+        "ticket_id": 81,
+        "user_id": "123"
+      }
+    }
+  },
+  {
+    "run_id": "run-fail-001",
+    "sequence": 4,
+    "timestamp": "2026-10-14T12:00:00.250Z",
+    "mode": "normal",
+    "type": "tool_call_failed",
+    "tool": "assign_ticket",
+    "data": {
+      "status_code": 422,
+      "error": {
+        "error": "ValidationFailed",
+        "code": "SCHEMA_MISMATCH",
+        "message": "Field 'user_id' has been renamed to 'assignee_id'",
+        "details": {
+          "expected_schema": {
+            "ticket_id": "integer",
+            "assignee_id": "string"
+          },
+          "received_payload": {
+            "ticket_id": 81,
+            "user_id": "123"
+          }
+        }
+      }
+    }
+  },
+  {
+    "run_id": "run-fail-001",
+    "sequence": 5,
+    "timestamp": "2026-10-14T12:00:00.290Z",
+    "mode": "normal",
+    "type": "run_failed",
+    "tool": "assign_ticket",
+    "data": {
+      "reason": "Downstream validation failure under normal baseline mode",
+      "duration_ms": 290.0
+    }
+  }
+]
