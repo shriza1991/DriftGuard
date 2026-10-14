@@ -177,14 +177,17 @@ async def assign_ticket(
 
         if scen == DriftScenario.RENAME:
             if not _is_int(raw_body.get("ticket_id")) or not isinstance(raw_body.get("assignee_id"), str):
+                details = {
+                    "expected_schema": {"ticket_id": "integer", "assignee_id": "string"},
+                    "received_payload": raw_body,
+                }
+                if mut_config.evidence_level == EvidenceLevel.EXPLICIT_HINT:
+                    details["migration_mapping"] = {"user_id": "assignee_id"}
                 return _validation_error(
                     status.HTTP_422_UNPROCESSABLE_ENTITY,
                     "SCHEMA_MISMATCH",
                     "Expected ticket_id as integer and assignee_id as string",
-                    {
-                        "expected_schema": {"ticket_id": "integer", "assignee_id": "string"},
-                        "received_payload": raw_body,
-                    },
+                    details,
                     hint,
                 )
             target_user_id = raw_body["assignee_id"]

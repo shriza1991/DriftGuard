@@ -199,6 +199,8 @@ async def test_benchmark_runner_executes_paired_trials_and_persists_results(tmp_
         )
 
     assert result.status == "completed"
+    assert result.execution_completed is True
+    assert result.all_expected_outcomes_met is True
     assert result.evaluated_trials == 4
     assert result.comparison_pairs == 2
     assert result.driftguard_recovery_rate == 100.0
@@ -211,3 +213,72 @@ async def test_benchmark_runner_executes_paired_trials_and_persists_results(tmp_
         cursor = await db.execute("SELECT COUNT(*) FROM evaluation_trials")
         row = await cursor.fetchone()
     assert row[0] == 4
+
+
+@pytest.mark.asyncio
+async def test_benchmark_runner_preserves_empty_timeout_error_and_reports_partial(tmp_path):
+    def mock_api_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/admin/mutation":
+            return httpx.Response(200, json={"active_scenario": "rename", "enabled": True})
+        if request.url.path == "/admin/state":
+            return httpx.Response(
+                200,
+                json={
+                    "tickets": {
+                        "81": {
+                            "id": 81,
+                            "status": "open",
+                            "assignee_id": None,
+                            "history": [],
+                        }
+                    }
+                },
+            )
+        return httpx.Response(404)
+
+    def orchestrator_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/demo/reset":
+            return httpx.Response(200, json={"mock_api": "reset_successful"})
+        if request.url.path == "/registry":
+            return httpx.Response(
+                200, json={"tools": [{"name": "assign_ticket", "version": "1.0.0"}]}
+            )
+        if request.url.path == "/runs":
+            raise httpx.ReadTimeout("", request=request)
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(orchestrator_handler), base_url="http://orchestrator"
+    ) as orchestrator_client, httpx.AsyncClient(
+        transport=httpx.MockTransport(mock_api_handler), base_url="http://mock"
+    ) as mock_client:
+        database_path = tmp_path / "timeout-evaluation.sqlite3"
+        runner = BenchmarkRunner(
+            database_path=str(database_path),
+            orchestrator_client=orchestrator_client,
+            mock_admin_client=mock_client,
+            timeout_seconds=60.0,
+        )
+        result = await runner.run_benchmarks(
+            BenchmarkRunRequest(
+                scenarios=["rename"],
+                evidence_levels=["explicit_hint"],
+                trials_per_scenario=1,
+            )
+        )
+
+    assert result.status == "partial"
+    assert result.execution_completed is False
+    assert result.all_expected_outcomes_met is False
+    assert all(record.run_status == "timed_out" for record in result.trials)
+    assert all(record.failure_stage == "run_execution" for record in result.trials)
+    assert all(record.error_type == "ReadTimeout" for record in result.trials)
+    assert all("60.0-second benchmark client timeout" in record.error for record in result.trials)
+    assert all(record.safe_refusal is False for record in result.trials)
+
+    async with aiosqlite.connect(database_path) as db:
+        cursor = await db.execute("SELECT record_json FROM evaluation_trials")
+        persisted = [json.loads(row[0]) for row in await cursor.fetchall()]
+    assert len(persisted) == 2
+    assert all(record["error_type"] == "ReadTimeout" for record in persisted)
+    assert all(record["failure_stage"] == "run_execution" for record in persisted)

@@ -180,8 +180,14 @@ async def test_recoverable_mutations_reject_stale_without_side_effect_and_accept
         assert "driftguard-demo-token" not in str(evidence)
         if evidence_level == "ordinary":
             assert evidence["hint"] is None
+            if scenario == "rename":
+                assert "migration_mapping" not in evidence["details"]
         else:
             assert evidence["hint"]
+            if scenario == "rename":
+                assert evidence["details"]["migration_mapping"] == {
+                    "user_id": "assignee_id"
+                }
 
         unchanged = (await client.get("/tickets/81")).json()
         assert unchanged["assignee_id"] is None
