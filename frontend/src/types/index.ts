@@ -60,6 +60,29 @@ export interface SystemMetrics {
   run_metrics: RunMetrics[];
 }
 
+export interface BenchmarkSummary {
+  status: 'measured' | 'unavailable';
+  timestamp?: string;
+  task?: string;
+  repetitions?: number;
+  message?: string;
+  metrics: null | {
+    recoverable_case_adaptation_rate_percent: number | null;
+    all_breaking_case_resolution_rate_percent: number | null;
+    safe_stop_rate_percent: number | null;
+    verified_task_correctness_percent: number | null;
+    median_mttr_ms: number | null;
+    p95_mttr_ms: number | null;
+    input_tokens: number;
+    output_tokens: number;
+    unsafe_execution_count: number;
+    maximum_retry_count: number;
+    warm_call_diagnosis_reduction_percent: number | null;
+    baseline_recoverable_success_rate_percent: number | null;
+  };
+  limitations?: string[];
+}
+
 export interface ModelUsageBreakdown {
   input_tokens: number | 'unavailable';
   output_tokens: number | 'unavailable';

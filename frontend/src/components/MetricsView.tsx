@@ -1,4 +1,4 @@
-import type { RunEvent, SystemMetrics } from '../types';
+import type { BenchmarkSummary, RunEvent, SystemMetrics } from '../types';
 import type { DataSource } from './DashboardViews';
 import { SampleLabel } from './DashboardViews';
 import { currentRunMetric, measuredTokens } from '../state/metricsState';
@@ -11,8 +11,9 @@ function Metric({ label, value, context }: { label: string; value: string; conte
   return <div className="metric-card"><span>{label}</span><strong>{value}</strong><small>{context}</small></div>;
 }
 
-export function BenchmarkView({ source, metrics, metricsLoading, metricsError, currentRunId, baselineEvents, healingEvents, sampleHistory }: {
+export function BenchmarkView({ source, metrics, benchmarkSummary, metricsLoading, metricsError, currentRunId, baselineEvents, healingEvents, sampleHistory }: {
   source: DataSource; metrics: SystemMetrics | null; metricsLoading: boolean; metricsError: string | null;
+  benchmarkSummary: BenchmarkSummary | null;
   currentRunId: string | null; baselineEvents: RunEvent[]; healingEvents: RunEvent[];
   sampleHistory: { scenario: string; baseline: string; healing: string }[];
 }) {
@@ -25,20 +26,23 @@ export function BenchmarkView({ source, metrics, metricsLoading, metricsError, c
   const session = current?.mode === 'healing' ? measuredTokens(current.session_token_usage) : null;
   const baselineTokens = baseline ? measuredTokens(baseline.session_token_usage) : null;
   const ordinaryTokens = ordinary ? measuredTokens(ordinary.session_token_usage) : null;
+  const measured = source === 'live' && benchmarkSummary?.status === 'measured' ? benchmarkSummary.metrics : null;
   return <div className="tab-content"><div className="page-title"><div><span className="eyebrow">Measured evidence</span><h1>Benchmark</h1><p>Run measurements and operational counts are shown by their actual scope. Evaluation rates await a published benchmark result.</p></div><SampleLabel source={source} /></div>
     {metricsLoading && source === 'live' && <p className="notice-line" role="status">Loading backend metrics…</p>}
     {metricsError && source === 'live' && <p className="error-line" role="alert">Metrics unavailable: {metricsError}</p>}
-    <section className="panel"><div className="section-heading"><div><span className="eyebrow">Controlled evaluation</span><h2>Adaptation and safety</h2></div><span className="pill pill-amber">Benchmark result unavailable</span></div>
+    <section className="panel"><div className="section-heading"><div><span className="eyebrow">Controlled evaluation</span><h2>Adaptation and safety</h2></div><span className={`pill ${measured ? 'pill-blue' : 'pill-amber'}`}>{measured ? 'Measured' : 'Planned · unavailable'}</span></div>
       <div className="metric-grid">
-        <Metric label="Adaptation rate" value="Unavailable" context="Verified recoverable trials / recoverable healing trials: Unavailable / Unavailable" />
-        <Metric label="Verified successes" value="Unavailable" context="Controlled recoverable healing trials" />
-        <Metric label="Safe refusals" value="Unavailable" context="Deliberately unsafe trials; excluded from adaptation" />
-        <Metric label="Failed recoveries" value="Unavailable" context="Recoverable trials that did not verify" />
-        <Metric label="Recovery sample count" value="Unavailable" context="Number of measured verified trial durations" />
-        <Metric label="Median recovery time" value="Unavailable" context="No benchmark median in GET /metrics" />
-        <Metric label="p95 recovery time" value="Unavailable" context="Show only with sufficient measured sample context" />
+        <Metric label="Adaptation rate" value={measured ? available(measured.recoverable_case_adaptation_rate_percent, '%') : 'Unavailable'} context="Measured verified recoveries / recoverable cold trials" />
+        <Metric label="All-breaking resolution" value={measured ? available(measured.all_breaking_case_resolution_rate_percent, '%') : 'Unavailable'} context="Verified recovery or authoritative safe stop" />
+        <Metric label="Safe-stop rate" value={measured ? available(measured.safe_stop_rate_percent, '%') : 'Unavailable'} context="Excluded from adaptation success" />
+        <Metric label="Verified correctness" value={measured ? available(measured.verified_task_correctness_percent, '%') : 'Unavailable'} context="Independent provider-state read" />
+        <Metric label="Median MTTR" value={measured ? available(measured.median_mttr_ms, ' ms') : 'Unavailable'} context="Cold verified recoveries" />
+        <Metric label="p95 MTTR" value={measured ? available(measured.p95_mttr_ms, ' ms') : 'Unavailable'} context="Measured only with sufficient samples" />
+        <Metric label="Unsafe executions" value={measured ? available(measured.unsafe_execution_count) : 'Unavailable'} context="Expected zero" />
+        <Metric label="Maximum retries" value={measured ? available(measured.maximum_retry_count) : 'Unavailable'} context="Expected maximum one" />
+        <Metric label="Warm diagnosis reduction" value={measured ? available(measured.warm_call_diagnosis_reduction_percent, '%') : 'Unavailable'} context="Second matching call" />
       </div>
-      <p className="subtle-note">GET /metrics does not publish evaluated recoverable and unsafe trial totals. Its repair-attempt count and healing-run count are different scopes, so no adaptation rate is calculated here.</p>
+      <p className="subtle-note">{measured ? `${benchmarkSummary?.repetitions} deterministic repetitions per scenario. Task: ${benchmarkSummary?.task}` : 'Run the documented benchmark command to publish measured results. Targets are never displayed as measurements.'}</p>
     </section>
     <section className="panel"><div className="section-heading"><div><span className="eyebrow">GET /metrics · persisted operations</span><h2>Operational measurements</h2></div><span className="pill pill-blue">Backend counters</span></div>
       <div className="metric-grid">

@@ -2,8 +2,8 @@ from typing import Dict
 from orchestrator.registry.models import ToolRegistryEntry, ToolArgumentSchema
 
 
-def create_default_registry() -> Dict[str, ToolRegistryEntry]:
-    """Generates the frozen v1 registry entries for the 3 target tools."""
+def create_default_registry(include_notification_tools: bool = False) -> Dict[str, ToolRegistryEntry]:
+    """Generate frozen v1 tools, optionally adding the hardening benchmark pair."""
     find_user = ToolRegistryEntry(
         name="find_user",
         version="1.0.0",
@@ -105,8 +105,59 @@ def create_default_registry() -> Dict[str, ToolRegistryEntry]:
     )
     get_ticket.fingerprint = get_ticket.compute_fingerprint()
 
-    return {
+    update_notifications = ToolRegistryEntry(
+        name="update_notification_preferences",
+        version="1.0.0",
+        description="Disable promotional notifications for an explicitly identified user.",
+        endpoint="/notifications/preferences",
+        method="POST",
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        argument_schema=ToolArgumentSchema(
+            type="object",
+            properties={
+                "user_id": {"type": "string", "description": "Existing user identifier"},
+                "promo": {"type": "boolean", "description": "Promotional notification preference"},
+            },
+            required=["user_id", "promo"],
+        ),
+        request_mapping={"body": {"user_id": "{user_id}", "promo": "{promo}"}},
+        response_mapping={
+            "user_id": "$.user_id",
+            "promo": "$.promo",
+            "idempotent_replayed": "$.idempotent_replayed",
+        },
+        credential_reference=None,
+        status="active",
+    )
+    update_notifications.fingerprint = update_notifications.compute_fingerprint()
+
+    get_notifications = ToolRegistryEntry(
+        name="get_notification_preferences",
+        version="1.0.0",
+        description="Read notification preferences for independent verification.",
+        endpoint="/notifications/preferences/{user_id}",
+        method="GET",
+        headers={"Accept": "application/json"},
+        argument_schema=ToolArgumentSchema(
+            type="object",
+            properties={"user_id": {"type": "string"}},
+            required=["user_id"],
+        ),
+        request_mapping={"path_params": {"user_id": "{user_id}"}},
+        response_mapping={"user_id": "$.user_id", "promo": "$.promo", "history": "$.history"},
+        credential_reference=None,
+        status="active",
+    )
+    get_notifications.fingerprint = get_notifications.compute_fingerprint()
+
+    tools = {
         "find_user": find_user,
         "assign_ticket": assign_ticket,
-        "get_ticket": get_ticket
+        "get_ticket": get_ticket,
     }
+    if include_notification_tools:
+        tools.update({
+            "update_notification_preferences": update_notifications,
+            "get_notification_preferences": get_notifications,
+        })
+    return tools

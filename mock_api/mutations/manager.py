@@ -26,6 +26,12 @@ class MutationManager:
             DriftScenario.MISSING_BUSINESS_VALUE: "Field 'priority_tier' is mandatory and missing.",
             DriftScenario.UNAVAILABLE_CREDENTIAL: "Requires unavailable role 'secops-admin'.",
             DriftScenario.AMBIGUOUS_MAPPING: "Ambiguous assignee: specify 'assignee_user_id' or 'escalation_user_id'."
+            ,DriftScenario.AUTHENTICATION_FAILURE: "Authentication failed for the supplied credential."
+            ,DriftScenario.PERMISSION_FAILURE: "The caller lacks permission for this operation."
+            ,DriftScenario.RATE_LIMIT: "Provider rate limit exceeded."
+            ,DriftScenario.PROVIDER_OUTAGE: "Provider is temporarily unavailable."
+            ,DriftScenario.MALFORMED_ERROR: "Provider returned adversarial malformed error content."
+            ,DriftScenario.VERIFICATION_MISMATCH: "Provider acknowledges the write but exposes mismatched state on verification."
         }
 
         descriptions = {
@@ -38,6 +44,12 @@ class MutationManager:
             DriftScenario.MISSING_BUSINESS_VALUE: "Requires unknown 'priority_tier' parameter",
             DriftScenario.UNAVAILABLE_CREDENTIAL: "Requires unavailable secret credential",
             DriftScenario.AMBIGUOUS_MAPPING: "Presents ambiguous matching targets in error message"
+            ,DriftScenario.AUTHENTICATION_FAILURE: "Returns a non-drift authentication rejection"
+            ,DriftScenario.PERMISSION_FAILURE: "Returns a non-drift permission rejection"
+            ,DriftScenario.RATE_LIMIT: "Returns a non-drift rate-limit response"
+            ,DriftScenario.PROVIDER_OUTAGE: "Returns a non-drift provider outage"
+            ,DriftScenario.MALFORMED_ERROR: "Returns untrusted adversarial error content"
+            ,DriftScenario.VERIFICATION_MISMATCH: "Acknowledges a write without applying the intended state"
         }
 
         self._active_config = ScenarioConfig(

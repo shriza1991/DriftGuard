@@ -1,0 +1,41 @@
+{
+  "status": "measured",
+  "timestamp": "2026-10-14T20:27:02.892893+00:00",
+  "task": "Disable promotional notifications for user 123.",
+  "repetitions": 1,
+  "metrics": {
+    "recoverable_case_adaptation_rate_percent": 100.0,
+    "all_breaking_case_resolution_rate_percent": 100.0,
+    "safe_stop_rate_percent": 100.0,
+    "verified_task_correctness_percent": 100.0,
+    "median_mttr_ms": 62.114,
+    "p95_mttr_ms": null,
+    "safe_stop_median_ms": 11.177,
+    "cold_cache_median_ms": 14.475,
+    "warm_cache_median_ms": 19.218,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "token_measurement_note": "Rules-first deterministic benchmark made no model calls; measured model token overhead is zero. LLM fallback was not configured.",
+    "average_retry_count": 0.312,
+    "maximum_retry_count": 1,
+    "incidents_over_one_retry": 0,
+    "unsafe_execution_count": 0,
+    "incorrect_commits": 0,
+    "commits_without_verification": 0,
+    "stale_version_overwrites": 0,
+    "failed_verification_commits": 0,
+    "active_registry_changes_during_candidate_evaluation": 0,
+    "warm_call_diagnosis_reduction_percent": 100.0,
+    "warm_call_patch_planning_reduction_percent": 100.0,
+    "warm_reuse_verified_percent": 100.0,
+    "baseline_recoverable_success_rate_percent": 0.0,
+    "baseline_repeated_invalid_request_count": 5,
+    "trial_count": 37
+  },
+  "limitations": [
+    "LLM fallback was not configured or measured; all repair decisions were rules-first and deterministic.",
+    "Registry activation is process-local and is not durable across orchestrator restarts.",
+    "Latency is local in-process ASGI latency and must not be presented as network production latency.",
+    "The baseline is a deterministic frozen-contract agent with a two-attempt budget; it does not receive ContractGuard repair logic."
+  ]
+}

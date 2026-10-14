@@ -1,4 +1,4 @@
-import type { CreateRunRequest, EvidenceLevel, MutationResponse, PatchPage, ResetResponse, RunSummary, SystemMetrics, ToolRegistryEntry } from '../types';
+import type { BenchmarkSummary, CreateRunRequest, EvidenceLevel, MutationResponse, PatchPage, ResetResponse, RunSummary, SystemMetrics, ToolRegistryEntry } from '../types';
 import { parsePatchPage } from '../state/patchState.ts';
 import { parseSystemMetrics } from '../state/metricsState.ts';
 
@@ -60,6 +60,7 @@ export class DriftGuardApiClient {
     return parsePatchPage(await this.json(`/patches?limit=${limit}&offset=${offset}`));
   }
   async fetchMetrics(): Promise<SystemMetrics> { return parseSystemMetrics(await this.json('/metrics')); }
+  async fetchBenchmarkSummary(): Promise<BenchmarkSummary> { return this.json('/benchmark-summary'); }
 }
 
 export const api = new DriftGuardApiClient();

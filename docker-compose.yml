@@ -1,0 +1,16 @@
+services:
+  mock-api:
+    build: .
+    command: ["python", "-m", "uvicorn", "mock_api.app:app", "--host", "0.0.0.0", "--port", "8001"]
+    ports: ["8001:8001"]
+  orchestrator:
+    build: .
+    environment:
+      ORCHESTRATOR_MOCK_API_URL: http://mock-api:8001
+    command: ["python", "-m", "uvicorn", "orchestrator.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on: [mock-api]
+    ports: ["8000:8000"]
+  frontend:
+    build: ./frontend
+    depends_on: [orchestrator]
+    ports: ["5173:80"]

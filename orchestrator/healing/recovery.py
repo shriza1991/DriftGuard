@@ -146,10 +146,33 @@ async def default_verify_business_intent(
                 "actual_assignee_id": actual_assignee,
             }
 
+    if tool_name == "update_notification_preferences":
+        expected_user = original_arguments.get("user_id") or original_arguments.get("target", {}).get("id")
+        expected_promo = original_arguments.get("promo")
+        if expected_promo is None and isinstance(original_arguments.get("preferences"), dict):
+            expected_promo = original_arguments["preferences"].get("promo")
+        if expected_user is None or expected_promo is not False:
+            return {"verified": False, "reason": "Original business intent must contain user_id and promo=false"}
+        ctx = ExecutionContext(run_id=run_id)
+        read_res = await executor.execute(
+            "get_notification_preferences", {"user_id": str(expected_user)}, context=ctx
+        )
+        if not read_res.is_success:
+            return {"verified": False, "reason": "Independent notification preference read failed"}
+        state = read_res.result or {}
+        verified = str(state.get("user_id")) == str(expected_user) and state.get("promo") is False
+        return {
+            "verified": verified,
+            "actual_user_id": state.get("user_id"),
+            "actual_promo": state.get("promo"),
+            "verification_method": "independent_read:get_notification_preferences",
+            **({} if verified else {"reason": "Independent verification did not observe promo=false for the requested user"}),
+        }
+
     # For other tools, verify that HTTP execution succeeded
-    if execution_result.is_success:
+    if execution_result.is_success and execution_result.operation_identity.method.upper() == "GET":
         return {"verified": True, "verification_method": "execution_status"}
-    return {"verified": False, "reason": "Execution did not succeed"}
+    return {"verified": False, "reason": "Mutating tools require a dedicated independent verifier"}
 
 
 class RecoveryController:

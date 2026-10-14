@@ -67,3 +67,4 @@ class AdminStateResponse(BaseModel):
     tickets: Dict[int, Ticket]
     active_mutation: Dict[str, Any]
     idempotency_records_count: int
+    notification_preferences: Dict[str, Dict[str, Any]] = Field(default_factory=dict)

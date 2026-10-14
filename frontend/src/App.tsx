@@ -5,7 +5,7 @@ import { api, ApiError } from './services/api';
 import { RunEventStream, type StreamStatus } from './services/eventStream';
 import { CommandGate } from './state/commandGate';
 import { mergeEvents, runOutcome } from './state/runState';
-import type { CreateRunRequest, EvidenceLevel, HealingExecution, RepairAttempt, RunEvent, RunSummary, SystemMetrics, ToolRegistryEntry } from './types';
+import type { BenchmarkSummary, CreateRunRequest, EvidenceLevel, HealingExecution, RepairAttempt, RunEvent, RunSummary, SystemMetrics, ToolRegistryEntry } from './types';
 
 type Tab = 'demo' | 'registry' | 'benchmark';
 type LiveAction = 'normal' | 'baseline' | 'healing';
@@ -36,6 +36,7 @@ export default function App() {
   const [metrics, setMetrics] = useState<SystemMetrics | null>(null);
   const [metricsLoading, setMetricsLoading] = useState(false);
   const [metricsError, setMetricsError] = useState<string | null>(null);
+  const [benchmarkSummary, setBenchmarkSummary] = useState<BenchmarkSummary | null>(null);
   const [sampleHistory, setSampleHistory] = useState<{ scenario: string; baseline: string; healing: string }[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -82,6 +83,14 @@ export default function App() {
         setError('Cannot load live registry or metrics. Check the orchestrator connection or response format.');
       else setError(null);
     });
+    return () => { cancelled = true; };
+  }, [source]);
+
+  useEffect(() => {
+    if (source !== 'live') { setBenchmarkSummary(null); return; }
+    let cancelled = false;
+    api.fetchBenchmarkSummary().then((summary) => { if (!cancelled) setBenchmarkSummary(summary); })
+      .catch(() => { if (!cancelled) setBenchmarkSummary(null); });
     return () => { cancelled = true; };
   }, [source]);
 
@@ -328,7 +337,7 @@ export default function App() {
     <main className="dashboard-main">
       {tab === 'demo' && <DemoView source={source} task={task} mutation={mutation} appliedMutation={appliedMutation} evidenceLevel={evidenceLevel} appliedEvidence={appliedEvidence} healingExecution={healingExecution} busy={busy} error={error} streamWarning={streamWarning} streamStatus={streamStatus} commandStatus={commandStatus} baselineEvents={baselineEvents} healingEvents={healingEvents} scope={scope} normalSelected={normalSelected} baselineSummary={baselineSummary} savedBaseline={savedBaseline} healingSummary={healingSummary} patches={patches} tools={tools} patchError={patchError} patchLoading={patchLoading} onTask={handleTaskChange} onMutation={handleMutationChange} onEvidence={handleEvidenceChange} onHealingExecution={handleHealingExecutionChange} onRun={handleRun} onReset={() => { void handleReset(); }} onApplyMutation={() => { void handleApplyMutation(); }} />}
       {tab === 'registry' && <RegistryAuditView source={source} tools={tools} events={visibleEvents} mutation={mutation} error={error} patches={patches} patchError={patchError} patchLoading={patchLoading} patchHasMore={patchHasMore} currentRunId={currentRunId} onLoadMore={() => { void loadMorePatches(); }} />}
-      {tab === 'benchmark' && <BenchmarkView source={source} metrics={metrics} metricsLoading={metricsLoading} metricsError={metricsError} currentRunId={currentRunId} baselineEvents={baselineEvents} healingEvents={healingEvents} sampleHistory={sampleHistory} />}
+      {tab === 'benchmark' && <BenchmarkView source={source} metrics={metrics} benchmarkSummary={benchmarkSummary} metricsLoading={metricsLoading} metricsError={metricsError} currentRunId={currentRunId} baselineEvents={baselineEvents} healingEvents={healingEvents} sampleHistory={sampleHistory} />}
     </main>
     <footer className="dashboard-footer"><span>DriftGuard / GENESIS 2.0</span><span>Evidence before commitment · independent verification</span></footer>
   </div>;

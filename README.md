@@ -1,7 +1,9 @@
-# DriftGuard
+# DriftGuard / ContractGuard
 
 **Autonomous Self-Healing Tool Registry for AI Agents**  
 *Genesis Hackathon PS01 Selection Prototype*
+
+**Naming:** DriftGuard is the repository and demo application name. **ContractGuard** is the bounded contract-repair engine demonstrated and benchmarked here. Reports use ContractGuard for the product capability and DriftGuard when referring to the repository/application.
 
 ---
 
@@ -175,9 +177,9 @@ DriftGuard/
 | **Event Stream (SSE)** | **Implemented** | Real-time broadcasting of 12 lifecycle event types with schema validation and secret redaction. |
 | **Dashboard Shell** | **Implemented** | React/TypeScript/Vite dark mode interface, live timeline, metrics tracking, registry viewer, and transparent pending states. |
 | **Automated Tests** | **Implemented** | 11/11 passing tests covering mock API, validation without side effects, idempotency, event schema, and reset. |
-| **Runtime Mutation Engine** | *Pending (M2 - Member 1)* | 8 drift mutations (rename, type_change, nesting, required_header, combined, and 3 refusal scenarios). |
-| **Autonomous Healer** | *Pending (M2 - Member 2)* | Failure classifier, diagnosis engine, LLM repair planner, deterministic safety gate, and hot-commit. |
-| **Benchmark Runner** | *Pending (M3 - Member 1)* | Automated baseline vs DriftGuard comparative evaluation harness. |
+| **Runtime Mutation Engine** | **Implemented** | Recoverable, refusal, non-drift, adversarial, verification-mismatch, and stale-version scenarios. |
+| **Autonomous Healer** | **Implemented (bounded prototype)** | Failure classifier, evidence planner, optional LLM fallback, deterministic validator, one retry, independent verification, and version-checked in-memory commit. |
+| **Benchmark Runner** | **Implemented** | Seeded baseline-versus-ContractGuard runner with raw JSON/CSV and measured Markdown/JSON summaries. |
 | **Slide Deck & Pitch** | *Pending (M3 - Member 4)* | Complete outline and script documented in `submission/`. |
 
 ---
@@ -224,6 +226,34 @@ npm run dev
 ```
 
 Open `http://localhost:5173` in your browser.
+
+### Reproducible safety benchmark
+
+The benchmark uses the fixed task **“Disable promotional notifications for user 123.”** with immutable `promo=false` intent. It runs 30 repetitions per deterministic scenario by default and never imports presentation values:
+
+```bash
+python -m evaluation.hardening_benchmark --repetitions 30 --seed 20261015 --output reports
+```
+
+Outputs are written to `reports/benchmark-results.json`, `reports/benchmark-results.csv`, `reports/benchmark-summary.md`, and `reports/benchmark-summary.json`. LLM fallback is not configured by this command; model-dependent results remain explicitly unclaimed.
+
+### Validation commands
+
+```bash
+python -m pytest -q --basetemp=.pytest-tmp
+cd frontend
+npm test
+npm run build
+```
+
+Docker Compose is provided for build verification and local startup:
+
+```bash
+docker compose build
+docker compose up
+```
+
+The active registry is intentionally process-local in this prototype. Verified repairs are reused by later matching calls in the same process but are not restored after restart.
 
 ---
 

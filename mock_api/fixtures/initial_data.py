@@ -46,3 +46,13 @@ def get_initial_users() -> List[Dict[str, Any]]:
 
 def get_initial_tickets() -> Dict[int, Dict[str, Any]]:
     return copy.deepcopy(INITIAL_TICKETS)
+
+
+INITIAL_NOTIFICATION_PREFERENCES: Dict[str, Dict[str, Any]] = {
+    "123": {"user_id": "123", "promo": True, "updated_at": None, "history": []},
+    "456": {"user_id": "456", "promo": True, "updated_at": None, "history": []},
+}
+
+
+def get_initial_notification_preferences() -> Dict[str, Dict[str, Any]]:
+    return copy.deepcopy(INITIAL_NOTIFICATION_PREFERENCES)

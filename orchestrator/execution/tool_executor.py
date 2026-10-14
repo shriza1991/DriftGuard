@@ -192,7 +192,13 @@ class ToolExecutor:
         if not snapshot.fingerprint:
             snapshot.fingerprint = snapshot.compute_fingerprint()
 
-        approved = {("find_user", "GET", "/users"), ("assign_ticket", "POST", "/tickets/assign"), ("get_ticket", "GET", "/tickets/{ticket_id}")}
+        approved = {
+            ("find_user", "GET", "/users"),
+            ("assign_ticket", "POST", "/tickets/assign"),
+            ("get_ticket", "GET", "/tickets/{ticket_id}"),
+            ("update_notification_preferences", "POST", "/notifications/preferences"),
+            ("get_notification_preferences", "GET", "/notifications/preferences/{user_id}"),
+        }
         if (snapshot.name, snapshot.method.upper(), snapshot.endpoint) not in approved:
             raise ValueError("Unapproved business tool destination")
 

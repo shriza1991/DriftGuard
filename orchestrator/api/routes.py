@@ -1,6 +1,7 @@
 import uuid
 import json
 import asyncio
+from pathlib import Path
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
 import httpx
@@ -33,6 +34,12 @@ ALLOWED_SCENARIOS = {
     "missing_business_value",
     "unavailable_credential",
     "ambiguous_mapping",
+    "authentication_failure",
+    "permission_failure",
+    "rate_limit",
+    "provider_outage",
+    "malformed_error",
+    "verification_mismatch",
 }
 
 ALLOWED_EVIDENCE_LEVELS = {"ordinary", "explicit_hint"}
@@ -674,3 +681,22 @@ async def get_metrics(
     offset = max(0, offset)
     audit_store = getattr(req.app.state, "audit_store", None)
     return await metrics_tracker.get_metrics(store=audit_store, limit=limit, offset=offset, mode=mode)
+
+
+@router.get("/benchmark-summary")
+async def get_benchmark_summary():
+    """Return measured benchmark output, or an explicit unavailable state."""
+    report_path = Path(__file__).resolve().parents[2] / "reports" / "benchmark-summary.json"
+    if not report_path.exists():
+        return {
+            "status": "unavailable",
+            "message": "Run the benchmark command to create measured results.",
+            "metrics": None,
+        }
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=503, detail="Benchmark summary is unreadable") from exc
+    if payload.get("status") != "measured" or not isinstance(payload.get("metrics"), dict):
+        raise HTTPException(status_code=503, detail="Benchmark summary is invalid")
+    return payload

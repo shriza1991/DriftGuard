@@ -30,6 +30,12 @@ class DriftScenario(str, Enum):
     MISSING_BUSINESS_VALUE = "missing_business_value"
     UNAVAILABLE_CREDENTIAL = "unavailable_credential"
     AMBIGUOUS_MAPPING = "ambiguous_mapping"
+    AUTHENTICATION_FAILURE = "authentication_failure"
+    PERMISSION_FAILURE = "permission_failure"
+    RATE_LIMIT = "rate_limit"
+    PROVIDER_OUTAGE = "provider_outage"
+    MALFORMED_ERROR = "malformed_error"
+    VERIFICATION_MISMATCH = "verification_mismatch"
 
 
 class EvidenceLevel(str, Enum):
