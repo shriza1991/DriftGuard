@@ -39,7 +39,8 @@ export async function resetDemo(): Promise<any> {
 export function subscribeToEvents(
   runId: string,
   onEvent: (event: RunEvent) => void,
-  onDone?: () => void
+  onDone?: () => void,
+  onError?: (message: string) => void
 ): () => void {
   const eventSource = new EventSource(`${API_BASE}/runs/${runId}/events`);
 
@@ -53,12 +54,14 @@ export function subscribeToEvents(
       }
     } catch (err) {
       console.error('Error parsing SSE event data:', err);
+      onError?.('A backend event could not be parsed.');
     }
   };
 
   eventSource.onerror = (err) => {
     console.warn('SSE event stream closed or interrupted:', err);
     eventSource.close();
+    onError?.('The backend event stream was interrupted. Final run status is unavailable.');
     onDone?.();
   };
 
