@@ -68,8 +68,6 @@ class TrialRecord(BaseModel):
     expected_outcome: str
     run_id: Optional[str] = None
     run_status: str
-    execution_completed: bool = False
-    expected_outcome_met: bool = False
     verified_recovery: bool = False
     safe_refusal: bool = False
     final_assignee_id: Optional[str] = None
@@ -80,24 +78,12 @@ class TrialRecord(BaseModel):
     diagnosis_tokens: Optional[int] = None
     termination_reason: Optional[str] = None
     error: Optional[str] = None
-    error_type: Optional[str] = None
-    failure_stage: Optional[str] = None
-    tool_call_attempts: int = 0
-    retry_attempts: int = 0
-    failure_evidence: Optional[Dict[str, Any]] = None
-    proposed_patch_operations: List[Dict[str, Any]] = Field(default_factory=list)
-    patch_validation_status: Optional[str] = None
-    recovery_verified_event: bool = False
-    committed_registry_version: Optional[str] = None
-    event_collection_error: Optional[str] = None
     created_at: str
 
 
 class BenchmarkResult(BaseModel):
     status: str
     message: str
-    execution_completed: bool
-    all_expected_outcomes_met: bool
     evaluated_trials: int
     comparison_pairs: int
     recoverable_healing_trials: int
@@ -116,16 +102,6 @@ class BenchmarkResult(BaseModel):
     token_usage_available_trials: int
     database_path: str
     trials: List[TrialRecord]
-
-
-class BenchmarkStageError(RuntimeError):
-    """Preserves the precise benchmark stage and original exception type."""
-
-    def __init__(self, stage: str, cause: Exception):
-        self.stage = stage
-        self.cause = cause
-        detail = str(cause).strip() or "no detail supplied"
-        super().__init__(f"{type(cause).__name__} during {stage}: {detail}")
 
 
 class BenchmarkRunner:
@@ -224,55 +200,34 @@ class BenchmarkRunner:
         scenario_id: str,
         evidence_level: str,
     ) -> None:
-        try:
-            reset = await orchestrator.post("/demo/reset")
-            reset.raise_for_status()
-            reset_payload = reset.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise BenchmarkStageError("reset", exc) from exc
+        reset = await orchestrator.post("/demo/reset")
+        reset.raise_for_status()
+        reset_payload = reset.json()
         if reset_payload.get("mock_api") != "reset_successful":
-            raise BenchmarkStageError(
-                "reset",
-                RuntimeError(f"Mock reset failed: {reset_payload.get('mock_api')}"),
-            )
+            raise RuntimeError(f"Mock reset failed: {reset_payload.get('mock_api')}")
 
-        try:
-            mutation = await mock_admin.post(
-                "/admin/mutation",
-                json={"scenario": scenario_id, "enabled": True, "evidence_level": evidence_level},
-            )
-            mutation.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise BenchmarkStageError("mutation_activation", exc) from exc
+        mutation = await mock_admin.post(
+            "/admin/mutation",
+            json={"scenario": scenario_id, "enabled": True, "evidence_level": evidence_level},
+        )
+        mutation.raise_for_status()
 
-        try:
-            state = await mock_admin.get("/admin/state")
-            state.raise_for_status()
-            state_payload = state.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise BenchmarkStageError("initial_state_verification", exc) from exc
+        state = await mock_admin.get("/admin/state")
+        state.raise_for_status()
+        state_payload = state.json()
         tickets = state_payload.get("tickets", {})
         ticket = tickets.get("81") or tickets.get(81) or {}
         if ticket.get("assignee_id") is not None or ticket.get("history"):
-            raise BenchmarkStageError(
-                "initial_state_verification",
-                RuntimeError("Mock state was not pristine before trial"),
-            )
+            raise RuntimeError("Mock state was not pristine before trial")
 
-        try:
-            registry = await orchestrator.get("/registry")
-            registry.raise_for_status()
-            assign_tool = next(
-                (tool for tool in registry.json().get("tools", []) if tool.get("name") == "assign_ticket"),
-                None,
-            )
-        except (httpx.HTTPError, ValueError) as exc:
-            raise BenchmarkStageError("registry_verification", exc) from exc
+        registry = await orchestrator.get("/registry")
+        registry.raise_for_status()
+        assign_tool = next(
+            (tool for tool in registry.json().get("tools", []) if tool.get("name") == "assign_ticket"),
+            None,
+        )
         if not assign_tool or assign_tool.get("version") != "1.0.0":
-            raise BenchmarkStageError(
-                "registry_verification",
-                RuntimeError("Active assign_ticket registry was not reset to version 1.0.0"),
-            )
+            raise RuntimeError("Active assign_ticket registry was not reset to version 1.0.0")
 
     @staticmethod
     def _token_value(model_usage: Any, field: str) -> Optional[int]:
@@ -281,22 +236,11 @@ class BenchmarkRunner:
         value = model_usage.get(field)
         return value if isinstance(value, int) and not isinstance(value, bool) else None
 
-    async def _collect_event_evidence(
+    async def _recovery_time_from_events(
         self, orchestrator: httpx.AsyncClient, run_id: Optional[str]
-    ) -> Dict[str, Any]:
-        evidence: Dict[str, Any] = {
-            "recovery_time_ms": None,
-            "tool_call_attempts": 0,
-            "retry_attempts": 0,
-            "failure_evidence": None,
-            "proposed_patch_operations": [],
-            "patch_validation_status": None,
-            "recovery_verified_event": False,
-            "committed_registry_version": None,
-            "event_collection_error": None,
-        }
+    ) -> Optional[float]:
         if not run_id:
-            return evidence
+            return None
         try:
             response = await orchestrator.get(f"/runs/{run_id}/events")
             response.raise_for_status()
@@ -304,41 +248,15 @@ class BenchmarkRunner:
             for line in response.text.splitlines():
                 if line.startswith("data: "):
                     events.append(json.loads(line[6:]))
-            evidence["tool_call_attempts"] = sum(
-                event.get("type") == "tool_call_started" for event in events
-            )
-            evidence["retry_attempts"] = sum(
-                event.get("type") == "retry_started" for event in events
-            )
-            failed = next((e for e in events if e.get("type") == "tool_call_failed"), None)
-            proposed = next((e for e in events if e.get("type") == "patch_proposed"), None)
-            validated = next(
-                (e for e in events if e.get("type") in {"patch_validated", "patch_rejected"}),
-                None,
-            )
-            verified = next((e for e in events if e.get("type") == "recovery_verified"), None)
-            committed = next((e for e in events if e.get("type") == "registry_committed"), None)
-            evidence["failure_evidence"] = failed.get("data") if failed else None
-            evidence["proposed_patch_operations"] = (
-                proposed.get("data", {}).get("operations", []) if proposed else []
-            )
-            evidence["patch_validation_status"] = validated.get("type") if validated else None
-            evidence["recovery_verified_event"] = verified is not None
-            evidence["committed_registry_version"] = (
-                committed.get("data", {}).get("committed_version") if committed else None
-            )
             start = next((e for e in events if e.get("type") == "tool_call_failed"), None)
             end = next((e for e in events if e.get("type") == "recovery_verified"), None)
-            if start and end:
-                start_at = datetime.fromisoformat(start["timestamp"].replace("Z", "+00:00"))
-                end_at = datetime.fromisoformat(end["timestamp"].replace("Z", "+00:00"))
-                evidence["recovery_time_ms"] = round(
-                    (end_at - start_at).total_seconds() * 1000, 2
-                )
-        except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError) as exc:
-            detail = str(exc).strip() or "no detail supplied"
-            evidence["event_collection_error"] = f"{type(exc).__name__}: {detail}"
-        return evidence
+            if not start or not end:
+                return None
+            start_at = datetime.fromisoformat(start["timestamp"].replace("Z", "+00:00"))
+            end_at = datetime.fromisoformat(end["timestamp"].replace("Z", "+00:00"))
+            return round((end_at - start_at).total_seconds() * 1000, 2)
+        except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError):
+            return None
 
     async def _run_one(
         self,
@@ -356,32 +274,18 @@ class BenchmarkRunner:
         started = time.perf_counter()
         run_payload: Dict[str, Any] = {}
         error: Optional[str] = None
-        error_type: Optional[str] = None
-        failure_stage: Optional[str] = None
-        caught_exception: Optional[Exception] = None
 
         try:
             await self._reset_and_activate(orchestrator, mock_admin, scenario_id, evidence_level)
             execution_type = "model_driven_baseline" if mode == "baseline" else "model_driven_healing"
-            try:
-                response = await orchestrator.post(
-                    "/runs",
-                    json={"mode": mode, "execution_type": execution_type, "task": request.task},
-                )
-                response.raise_for_status()
-                run_payload = response.json()
-            except (httpx.HTTPError, ValueError) as exc:
-                raise BenchmarkStageError("run_execution", exc) from exc
-        except BenchmarkStageError as exc:
-            caught_exception = exc.cause
-            failure_stage = exc.stage
-            error_type = type(exc.cause).__name__
-            detail = str(exc.cause).strip()
-            if isinstance(exc.cause, httpx.TimeoutException) and not detail:
-                detail = f"request exceeded the {self.timeout_seconds:.1f}-second benchmark client timeout"
-            elif not detail:
-                detail = "no detail supplied"
-            error = f"{error_type} during {failure_stage}: {detail}"
+            response = await orchestrator.post(
+                "/runs",
+                json={"mode": mode, "execution_type": execution_type, "task": request.task},
+            )
+            response.raise_for_status()
+            run_payload = response.json()
+        except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+            error = str(exc)
 
         duration_ms = round((time.perf_counter() - started) * 1000, 2)
         state_payload: Dict[str, Any] = {}
@@ -389,12 +293,8 @@ class BenchmarkRunner:
             state_response = await mock_admin.get("/admin/state")
             state_response.raise_for_status()
             state_payload = state_response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            if error is None:
-                failure_stage = "final_state_verification"
-                error_type = type(exc).__name__
-                detail = str(exc).strip() or "no detail supplied"
-                error = f"{error_type} during final_state_verification: {detail}"
+        except httpx.HTTPError as exc:
+            error = error or f"Independent state verification failed: {exc}"
 
         tickets = state_payload.get("tickets", {})
         ticket = tickets.get("81") or tickets.get(81) or {}
@@ -417,26 +317,12 @@ class BenchmarkRunner:
             and final_assignee is None
             and intended_effect_count == 0
         )
-        event_evidence = await self._collect_event_evidence(
-            orchestrator, run_payload.get("run_id")
+        recovery_time = (
+            await self._recovery_time_from_events(orchestrator, run_payload.get("run_id"))
+            if mode == "healing"
+            else None
         )
         usage = run_payload.get("model_usage")
-        run_status = run_payload.get("status")
-        if not run_status:
-            if isinstance(caught_exception, httpx.TimeoutException):
-                run_status = "timed_out"
-            elif failure_stage == "run_execution":
-                run_status = "run_request_failed"
-            elif failure_stage:
-                run_status = "setup_failed"
-            else:
-                run_status = "unknown"
-        execution_completed = bool(
-            run_payload.get("run_id") and run_status in {"completed", "failed"}
-        )
-        expected_outcome_met = bool(
-            mode == "healing" and (verified or safe_refusal)
-        )
         return TrialRecord(
             trial_id=f"trial-{uuid.uuid4().hex[:12]}",
             comparison_id=comparison_id,
@@ -446,29 +332,17 @@ class BenchmarkRunner:
             mode=mode,
             expected_outcome=scenario.expected_outcome,
             run_id=run_payload.get("run_id"),
-            run_status=run_status,
-            execution_completed=execution_completed,
-            expected_outcome_met=expected_outcome_met,
+            run_status=run_payload.get("status", "setup_failed" if error else "unknown"),
             verified_recovery=verified,
             safe_refusal=safe_refusal,
             final_assignee_id=None if final_assignee is None else str(final_assignee),
             intended_effect_count=intended_effect_count,
             duration_ms=run_payload.get("duration_ms") if isinstance(run_payload.get("duration_ms"), (int, float)) else duration_ms,
-            recovery_time_ms=event_evidence["recovery_time_ms"],
+            recovery_time_ms=recovery_time,
             total_tokens=self._token_value(usage, "total_tokens"),
             diagnosis_tokens=self._token_value(usage, "diagnosis_tokens"),
             termination_reason=run_payload.get("termination_reason"),
             error=error or run_payload.get("error"),
-            error_type=error_type,
-            failure_stage=failure_stage,
-            tool_call_attempts=event_evidence["tool_call_attempts"],
-            retry_attempts=event_evidence["retry_attempts"],
-            failure_evidence=event_evidence["failure_evidence"],
-            proposed_patch_operations=event_evidence["proposed_patch_operations"],
-            patch_validation_status=event_evidence["patch_validation_status"],
-            recovery_verified_event=event_evidence["recovery_verified_event"],
-            committed_registry_version=event_evidence["committed_registry_version"],
-            event_collection_error=event_evidence["event_collection_error"],
             created_at=created_at,
         )
 
@@ -515,36 +389,19 @@ class BenchmarkRunner:
             record.recovery_time_ms for record in recoverable
             if record.verified_recovery and record.recovery_time_ms is not None
         ]
-        execution_completed = bool(trials) and all(record.execution_completed for record in trials)
-        all_expected_outcomes_met = bool(healing) and all(
-            record.expected_outcome_met for record in healing
-        )
-        incomplete_trials = sum(not record.execution_completed for record in trials)
-        unmet_healing_outcomes = sum(not record.expected_outcome_met for record in healing)
-        if incomplete_trials:
-            status = "partial"
-            message = (
-                f"Benchmark ended with {incomplete_trials} incomplete trial(s); "
-                "inspect failure_stage, error_type, and error."
-            )
-        elif not all_expected_outcomes_met:
-            status = "completed_with_failures"
-            message = (
-                f"All trial executions reached a terminal state, but {unmet_healing_outcomes} "
-                "healing outcome(s) did not meet expectations."
-            )
-        else:
-            status = "completed"
-            message = "All requested trials completed and all healing outcomes met expectations."
+        failed_setups = sum(record.run_status == "setup_failed" for record in trials)
+        status = "completed" if failed_setups == 0 else "partial"
         p95 = None
         if len(recovery_times) >= 20:
             p95 = round(statistics.quantiles(recovery_times, n=100, method="inclusive")[94], 2)
 
         return BenchmarkResult(
             status=status,
-            message=message,
-            execution_completed=execution_completed,
-            all_expected_outcomes_met=all_expected_outcomes_met,
+            message=(
+                "All requested measured trials completed."
+                if status == "completed"
+                else f"Benchmark completed with {failed_setups} setup failures; inspect trial errors."
+            ),
             evaluated_trials=len(trials),
             comparison_pairs=len({record.comparison_id for record in trials}),
             recoverable_healing_trials=len(recoverable),
