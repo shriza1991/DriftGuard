@@ -925,3 +925,159 @@ Returns system metrics alongside paginated per-run metrics:
   ]
 }
 ```
+
+---
+
+## 11. Orchestrator Endpoints & SSE Integration Specification (Member 2 Task 11)
+
+This section details the HTTP orchestration, SSE event streaming, admission serialization, and demo controls implemented in Task 11.
+
+### 11.1 Run Lifecycle & Triggering (`POST /runs`)
+
+```http
+POST /runs
+Content-Type: application/json
+
+{
+  "mode": "normal",
+  "task": "Find Maya's user ID, assign ticket 81 to her, and confirm the updated assignee.",
+  "execution_type": "deterministic",
+  "wait": false
+}
+```
+
+- **Parameters**:
+  - `mode`: `"normal" | "healing" | "baseline"` (Required).
+  - `task`: Target user prompt (Defaults to canonical ticket assignment task).
+  - `execution_type`: `"deterministic" | "model_driven_baseline" | "model_driven_healing"` (Optional; validated for compatibility with `mode`).
+  - `wait`: `false` (default) for prompt return with `status: "running"`; `true` to await workflow completion synchronously.
+- **Validation Rules**:
+  - `mode == "baseline"` with `execution_type in ["deterministic", "model_driven_healing"]` &rarr; `400 Bad Request`.
+  - `mode == "normal"` with `execution_type == "model_driven_healing"` &rarr; `400 Bad Request`.
+  - `mode == "healing"` with `execution_type == "model_driven_baseline"` &rarr; `400 Bad Request`.
+  - Unsupported values return `400 Bad Request`.
+- **Response (200 OK - Prompt Return)**:
+```json
+{
+  "run_id": "run-f1a2b3c4",
+  "status": "running",
+  "mode": "normal",
+  "task": "Find Maya's user ID, assign ticket 81 to her, and confirm the updated assignee.",
+  "created_at": "2026-10-14T14:00:00.000000+00:00",
+  "execution_type": "deterministic"
+}
+```
+
+### 11.2 Run Status Retrieval (`GET /runs/{run_id}`)
+
+Retrieves run summary from active memory or persistent SQLite audit store. Returns `404 Not Found` if the run ID does not exist.
+
+```json
+{
+  "run_id": "run-f1a2b3c4",
+  "status": "completed",
+  "mode": "normal",
+  "task": "Find Maya's user ID, assign ticket 81 to her, and confirm the updated assignee.",
+  "created_at": "2026-10-14T14:00:00.000000+00:00",
+  "completed_at": "2026-10-14T14:00:00.150000+00:00",
+  "duration_ms": 150.0,
+  "outcome": {
+    "ticket_id": 81,
+    "target_user_name": "Maya",
+    "resolved_user_id": "123",
+    "verified_assignee_id": "123",
+    "verified": true,
+    "execution_type": "deterministic_normal_workflow"
+  },
+  "error": null,
+  "execution_type": "deterministic"
+}
+```
+
+### 11.3 Reliable Server-Sent Events (SSE) Stream (`GET /runs/{run_id}/events`)
+
+- **Protocol**: `text/event-stream` adhering to `contracts/events.schema.json`.
+- **Event ID**: Strictly derived from run-local monotonic sequence integer (`id: <seq>`).
+- **Data Payload**: Single-line compact JSON conforming to the contract.
+- **Initial Replay Cursor**:
+  - Sent via standard header: `Last-Event-ID: <seq>`
+  - Or query parameter: `?cursor=<seq>` or `?last_event_id=<seq>`
+  - Negative or conflicting cursor values return `400 Bad Request`.
+- **404 Pre-check**: If `run_id` is unknown in memory and SQLite, returns `404 Not Found` before establishing the stream.
+- **Gapless Replay & Live Handoff**:
+  1. Registers bounded live subscriber queue.
+  2. Authoritatively loads persisted events from SQLite (or memory) after the cursor (`sequence > cursor`).
+  3. Replays historical events in strict monotonic order.
+  4. Transitions to live queue, deduplicating any live events with `sequence <= last_sent_seq`.
+  5. If run is already terminal (`completed`, `failed`, `interrupted`), drains historical events and cleanly closes.
+- **Keepalive Heartbeats**: Sends `: ping\n\n` comments every 2.0s during idle periods (ignored by standard SSE parsers).
+- **Slow Consumer Overflow**: Bounded queue (`maxsize=100`). On overflow, the stream emits a structured error and closes cleanly:
+```
+id: 12
+event: error
+data: {"error": "slow_consumer_overflow", "message": "Subscriber queue overflowed; reconnect with Last-Event-ID", "last_event_id": 12}
+```
+Client reconnects with `Last-Event-ID: 12` to resume gaplessly without data loss.
+- **Disconnect Safety**: SSE client disconnect does NOT cancel the background run or trigger duplicate writes.
+
+### 11.4 Concurrency Control & AppAdmissionGate (`HTTP 409 Conflict`)
+
+The orchestrator enforces a single active run at a time to prevent shared-state corruption:
+- Active Run + Attempted Second Run &rarr; `409 Conflict` (`"Cannot start run: another run '<id>' is currently active"`).
+- Active Run + Attempted Reset &rarr; `409 Conflict` (`"Cannot execute demo reset while run '<id>' is active"`).
+- Active Run + Attempted Mutation &rarr; `409 Conflict` (`"Cannot configure mutation while run '<id>' is active"`).
+- Priority Ordering & Lock Hierarchy:
+  1. `AppAdmissionGate` (`asyncio.Lock` at the HTTP API boundary).
+  2. `VersionedToolRegistry.tool_lock` (`AsyncRLock` per tool inside recovery staging/commit).
+  Guarantees zero deadlocks.
+
+### 11.5 Demo Reset & Admin Forwarding (`POST /demo/reset`)
+
+```http
+POST /demo/reset
+```
+
+- **Requirements**: Requires idle admission state (no active runs or mutations).
+- **Execution Flow**:
+  1. Forwards reset request exclusively to `MockAdminApiClient.reset()` (`POST /admin/reset`).
+  2. If downstream reset fails: marks orchestrator gate state as `DEMO_STATE_UNKNOWN`, returns `502 Bad Gateway`, and blocks all subsequent runs with `409 Conflict` until a successful reset restores consistency.
+  3. If downstream reset succeeds: resets runtime workflow store, resets tool registry to canonical v1 definitions, clears recovery operation tracking, and returns `200 OK`.
+  4. SQLite audit store and run history are strictly preserved (never purged or dropped).
+- **Success Response (200 OK)**:
+```json
+{
+  "status": "reset_completed",
+  "orchestrator": "state_cleared",
+  "mock_api": "reset_successful",
+  "mock_api_details": {
+    "status": "reset_successful",
+    "tickets_reset": 2,
+    "users_reset": 3
+  },
+  "audit_store": "preserved"
+}
+```
+
+### 11.6 Demo Mutation Controls (`POST /demo/mutation`)
+
+```http
+POST /demo/mutation
+Content-Type: application/json
+
+{
+  "scenario": "rename",
+  "enabled": true,
+  "evidence_level": "ordinary"
+}
+```
+
+- **Allowlisted Scenarios**: `none`, `rename`, `type_change`, `nesting`, `required_header`, `combined`, `missing_business_value`, `unavailable_credential`, `ambiguous_mapping`.
+- **Forwarding**: Exclusively forwarded via `MockAdminApiClient.set_mutation(...)`. Sanitizes downstream errors and releases admission gate on all error paths.
+
+### 11.7 Graceful Shutdown & Task Manager
+
+- On FastAPI lifespan shutdown:
+  1. `AppTaskManager.cancel_and_wait_all(timeout=5.0)` cancels all running background tasks within a finite 5.0s budget.
+  2. Unfinalized runs are marked `status: "interrupted"`, `termination_reason: "shutdown_cancelled"`.
+  3. Business and admin HTTP clients are cleanly closed (`aclose()`).
+```

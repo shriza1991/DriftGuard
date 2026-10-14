@@ -187,6 +187,13 @@ class RecoveryController:
         # Track operations that have had a repaired dispatch (max 1 repaired dispatch per operation)
         self._dispatched_operations: Set[str] = set()
 
+    def reset_operation_tracking(self) -> None:
+        """Clears operation tracking sets for demo reset."""
+        self._attempted_proposals.clear()
+        self._diagnosed_operations.clear()
+        self._dispatched_operations.clear()
+
+
     def _emit_event(
         self,
         run_id: str,

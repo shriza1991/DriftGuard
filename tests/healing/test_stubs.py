@@ -33,12 +33,16 @@ async def test_orchestrator_registry_and_metrics():
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_mutation_disabled_stub():
+async def test_orchestrator_mutation_forwarding():
+    from orchestrator.client.mock_client import MockAdminApiClient
+    orch_app.state.admin_client = MockAdminApiClient(transport=ASGITransport(app=mock_app))
     transport = ASGITransport(app=orch_app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        res = await client.post("/demo/mutation")
-        assert res.status_code == 501
-        assert res.json()["status"] == "not_implemented"
+        res = await client.post("/demo/mutation", json={"scenario": "rename", "enabled": True})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["active_scenario"] == "rename"
+        assert data["enabled"] is True
 
 
 @pytest.mark.asyncio
@@ -81,7 +85,7 @@ async def test_normal_workflow_execution_end_to_end():
         orch_transport = ASGITransport(app=orch_app)
         async with AsyncClient(transport=orch_transport, base_url="http://test") as client:
             # Trigger run
-            run_res = await client.post("/runs", json={"mode": "normal"})
+            run_res = await client.post("/runs", json={"mode": "normal", "wait": True})
             assert run_res.status_code == 200
             run = run_res.json()
             assert run["status"] == "completed"

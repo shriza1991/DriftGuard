@@ -272,14 +272,40 @@
 
 ## 4. Next Tasks
 
-- [ ] **Task 11: Orchestrator Endpoints & SSE Integration (`orchestrator/api/`)**:
-  - Real-time and historical replay Server-Sent Events stream (`GET /runs/{run_id}/events`).
-  - Active tool registry management endpoints (`GET /registry`).
-  - Patch inspection endpoints (`GET /patches`).
-  - Live and historical system metrics endpoints (`GET /metrics`).
-  - Automated demo reset endpoint (`POST /demo/reset`) with Mock API coordination.
+- [x] **Task 11: Orchestrator Endpoints & SSE Integration (`orchestrator/api/`, `orchestrator/execution/`)**:
+  - Full HTTP Endpoints Suite (`orchestrator/api/routes.py`):
+    - `POST /runs`: Allocates run, coordinates admission atomically via `AppAdmissionGate`, persists run start immediately in SQLite audit store, and spawns the workflow inside an app-managed background task. Returns prompt run ID with `status: "running"` when `wait=False` (default), or awaits completion when `wait=True`. Validates mode (`normal`, `healing`, `baseline`) and execution_type compatibility (`model_driven_baseline`, `model_driven_healing`, `deterministic`), rejecting conflicting or unsupported values with HTTP 400.
+    - `GET /runs/{run_id}`: Retrieves run outcome and model usage summary from in-memory store or persistent SQLite audit records. Returns HTTP 404 if not found.
+    - `GET /runs/{run_id}/events`: Reliable Server-Sent Events (SSE) stream adhering to `contracts/events.schema.json`. Event IDs strictly derived from run-local sequence (`id: <seq>`). Validates `Last-Event-ID` header and `cursor` query parameters; returns 400 on conflicting or negative values. Replays events after cursor from durable SQLite audit store / memory, transitioning to live subscriber queue without sequence gaps or duplicates. Bounded queue with overflow detection (`slow_consumer_overflow`). Emits `: ping\n\n` comments during idle periods. Returns 404 before opening stream if run does not exist. Client disconnect does not interrupt the background run or duplicate writes.
+    - `GET /registry`: Returns active runtime tool definitions from `VersionedToolRegistry.list_active()`, never exposing archived candidate definitions or credentials.
+    - `GET /patches`: Returns active patches alongside paginated repair attempts from SQLite audit store (`limit`, `offset`).
+    - `POST /demo/reset`: Requires idle admission gate; forwards reset via `MockAdminApiClient.reset()`. Orchestrator runtime state, default registry, and operation tracking reset ONLY after downstream reset succeeds. On downstream failure, marks `DEMO_STATE_UNKNOWN`, returns 502, and blocks new runs until reset succeeds. Preserves persistent SQLite audit history.
+    - `POST /demo/mutation`: Validates scenario against Member 1 allowlist (`none`, `rename`, `type_change`, `nesting`, `required_header`, `combined`, `missing_business_value`, `unavailable_credential`, `ambiguous_mapping`) and forwards via `MockAdminApiClient.set_mutation(...)`, serialized through admission gate.
+    - `GET /metrics`: Returns real measured system metrics and paginated per-run metrics.
+    - Configurable CORS: `settings.cors_origins` allows local frontend access.
+  - Serialization & Gate Management (`orchestrator/execution/gate.py`):
+    - `AppAdmissionGate`: Atomic coordination for run admission, reset, and mutation via `asyncio.Lock`.
+    - Single active run execution in shared-state prototype. Conflicting commands rejected with HTTP 409.
+    - States: `IDLE`, `RUN_ACTIVE`, `RESET_ACTIVE`, `MUTATION_ACTIVE`, `DEMO_STATE_UNKNOWN`.
+    - Hierarchical Lock Ordering: Application Admission Gate (HTTP boundary) &rarr; Per-Tool Registry Lock (Recovery staging/commit). Guarantees zero deadlocks.
+  - Background Task Management & Graceful Shutdown (`orchestrator/execution/tasks.py`):
+    - `AppTaskManager`: Spawns, tracks, and cleans up background run tasks.
+    - On lifespan shutdown, cancels and awaits active tasks within a finite 5.0s budget, updating unfinalized runs to `interrupted` with `termination_reason = "shutdown_cancelled"`. Prevents orphaned tasks.
+  - Recovery Operation Reset (`orchestrator/healing/recovery.py`):
+    - `reset_operation_tracking()`: Clears `_attempted_proposals`, `_diagnosed_operations`, and `_dispatched_operations` on demo reset.
+  - Targeted Test Suite (`tests/healing/test_orchestrator_integration.py`):
+    - 14 comprehensive integration tests covering prompt return, mode validation, concurrency 409 rejection, gate error release, admin forwarding, demo state unknown, SSE 404 on missing run, cursor validation, gapless replay/live handoff, Last-Event-ID reconnect, slow-consumer overflow, disconnect persistence, and restart survival.
+  - Full Regression Verification: All 149 tests in `tests/healing/` passing in ~48 seconds.
 
 ---
+
+## 4. Next Tasks
+
+- [ ] **Task 12: Integration Verification & Team Handoff**:
+  - Rehearse end-to-end drift scenarios: normal &rarr; drift mutation &rarr; autonomous recovery &rarr; second-run hot-commit reuse.
+  - Verify live and offline interoperability with Member 1's mock API and Member 3's frontend dashboard.
+  - Review documentation and final handoff deliverables.
+
 
 ## 5. Acceptance Criteria
 1. Baseline mode fails deterministically when drift mutation is enabled.

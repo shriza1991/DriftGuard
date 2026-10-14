@@ -190,7 +190,7 @@ class WorkflowExecutionManager:
                         status="success" if res_1.is_success else "failed",
                         result=res_1.outcome or res_1.result,
                         failure=res_1.failure.model_dump() if res_1.failure else None,
-                        timing={"duration_ms": res_1.duration_ms} if res_1 else None,
+                        timing={"duration_ms": res_1.timing.duration_ms} if (res_1 and res_1.timing) else None,
                         operation_identity=res_1.operation_identity.key if res_1.operation_identity else None,
                     )
                 if not res_1.is_success:
@@ -351,7 +351,7 @@ class WorkflowExecutionManager:
                         status="success" if res_2.is_success else "failed",
                         result=res_2.outcome or res_2.result,
                         failure=res_2.failure.model_dump() if res_2.failure else None,
-                        timing={"duration_ms": res_2.duration_ms} if res_2 else None,
+                        timing={"duration_ms": res_2.timing.duration_ms} if (res_2 and res_2.timing) else None,
                         operation_identity=res_2.operation_identity.key if res_2.operation_identity else None,
                     )
                 if not res_2.is_success:
@@ -505,7 +505,7 @@ class WorkflowExecutionManager:
                         status="success" if res_3.is_success else "failed",
                         result=res_3.outcome or res_3.result,
                         failure=res_3.failure.model_dump() if res_3.failure else None,
-                        timing={"duration_ms": res_3.duration_ms} if res_3 else None,
+                        timing={"duration_ms": res_3.timing.duration_ms} if (res_3 and res_3.timing) else None,
                         operation_identity=res_3.operation_identity.key if res_3.operation_identity else None,
                     )
                 if not res_3.is_success:

@@ -177,6 +177,38 @@
   4. *Demo Reset Isolation*: `POST /demo/reset` clears in-memory runs, listeners, metrics, and resets the tool registry to canonical v1. The persistent SQLite audit store is strictly preserved, and no destructive public table-drop endpoint is provided.
 - **Rationale**: Guarantees scientific evaluation integrity for Member 1 and prevents synthetic or misleading dashboard metrics for Member 3.
 
+## ADR-031: AppAdmissionGate Concurrency Coordination and Hierarchical Lock Ordering
+- **Context**: In this shared-state prototype, concurrent workflow runs, demo resets, or drift mutations can race and corrupt tool registry and mock API state.
+- **Decision**:
+  1. An application-level admission gate (`AppAdmissionGate`) uses an `asyncio.Lock` to coordinate operations atomically at the HTTP boundary.
+  2. Exactly one workflow run is admitted at a time (`AdmissionState.RUN_ACTIVE`). Conflicting run or demo requests receive an immediate `409 Conflict`.
+  3. Strict Hierarchical Lock Ordering:
+     - Level 1: `AppAdmissionGate` (acquired at the HTTP endpoint boundary for run, reset, or mutation).
+     - Level 2: `VersionedToolRegistry.tool_lock` (per-tool `AsyncRLock` acquired inside `RecoveryController` during Step 2 staging and commit).
+     Guarantees zero deadlocks by maintaining strict forward acquisition order.
+  4. The admission gate is released safely on all exit paths: success, unhandled error, and cancellation.
+- **Rationale**: Prevents check-then-act races across HTTP endpoints while maintaining clean lock boundaries.
+
+## ADR-032: Reliable Server-Sent Events (SSE) Streaming with Monotonic IDs, Gapless Replay, and Slow Consumer Recovery
+- **Context**: Member 3's frontend dashboard relies on `/runs/{run_id}/events` to render live execution timelines, historical replay, and reconnection after network drops.
+- **Decision**:
+  1. *Stream Framing*: Follows `text/event-stream` with `id: <seq>` derived from run-local monotonic sequence integer and single-line JSON data conforming to `contracts/events.schema.json`.
+  2. *Cursor Validation*: Accepts `Last-Event-ID` header and `cursor` query parameters. Non-negative integers required; conflicting or negative values fail with `400 Bad Request`.
+  3. *Gapless Replay & Live Handoff*: Registers bounded live subscriber queue before loading historical events from durable SQLite audit store. Historical events after cursor are replayed monotonically; live queue deduplicates events with `sequence <= last_sent_seq`.
+  4. *Preamble & Heartbeats*: Emits keepalive `: ping\n\n` comments every 2.0s during idle periods.
+  5. *Slow Consumer Overflow*: Bounded subscriber queues (`maxsize=100`). On overflow, the stream emits a structured error (`slow_consumer_overflow`) and cleanly disconnects, allowing the client to reconnect with `Last-Event-ID: <last_sent_seq>` rather than silently dropping events.
+  6. *Disconnect Safety*: Client disconnect does not cancel background workflow tasks or duplicate writes.
+- **Rationale**: Guarantees truthful, gapless event visualization for frontend consumers without unbounded memory growth or write side-effects.
+
+## ADR-033: Admin Forwarding Isolation and Downstream Failure Quarantine (DEMO_STATE_UNKNOWN)
+- **Context**: Demo controls (`POST /demo/reset`, `POST /demo/mutation`) interact with downstream mock fixtures. If downstream fixtures fail to reset, local orchestrator state can diverge from downstream state.
+- **Decision**:
+  1. Admin requests are forwarded exclusively via `MockAdminApiClient`. Healer diagnosis and agent tools remain strictly prohibited from importing or querying admin endpoints.
+  2. Orchestrator runtime resets (in-memory run store, tool registry, operation tracking) occur **only after** downstream mock reset succeeds (`200 OK`).
+  3. If downstream reset fails or times out, the admission gate transitions to `AdmissionState.DEMO_STATE_UNKNOWN`, returns `502 Bad Gateway`, and blocks all subsequent runs with `409 Conflict` until a successful reset restores consistency.
+  4. `POST /demo/mutation` enforces Member 1's scenario allowlist and evidence level validation, rejecting unknown scenarios with `400 Bad Request`.
+- **Rationale**: Quarantines inconsistent demo environments and ensures business tool execution never operates against uncertain downstream fixtures.
+
 ---
 
 ## Technical Clarifications & Invariant Reminders
@@ -191,6 +223,9 @@
 > 6. LLM proposals have `source: "llm_assisted"` and are authorized through the identical deterministic safety validator as deterministic proposals. Neither source confers automatic authorization.
 > 7. Pre-write audit failures strictly halt mutating recovery; post-write audit failures flag `audit_incomplete` without repeating writes.
 > 8. Demo reset preserves SQLite audit history; startup never auto-activates persisted patches.
+> 9. Concurrency is coordinated atomically via `AppAdmissionGate`; conflicting commands return `409 Conflict`.
+> 10. SSE streams provide gapless replay and disconnect cleanly on queue overflow (`slow_consumer_overflow`).
+
 
 
 

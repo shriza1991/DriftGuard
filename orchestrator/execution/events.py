@@ -26,11 +26,19 @@ def redact_secrets(data: Any) -> Any:
     return data
 
 
+class EventSubscriber:
+    """Subscriber wrapper for an SSE client queue with overflow tracking."""
+    def __init__(self, maxsize: int = 100):
+        self.queue: asyncio.Queue[RunEvent] = asyncio.Queue(maxsize=maxsize)
+        self.overflowed: bool = False
+
+
 class EventBroadcaster:
     """In-memory event hub managing event history and real-time SSE listener queues."""
     def __init__(self, audit_store: Optional[Any] = None):
         self._events_by_run: Dict[str, List[RunEvent]] = {}
         self._listeners_by_run: Dict[str, List[asyncio.Queue]] = {}
+        self._subscribers_by_run: Dict[str, List[EventSubscriber]] = {}
         self._schema: Optional[Dict[str, Any]] = None
         self._audit_store = audit_store
         self._load_schema()
@@ -82,13 +90,21 @@ class EventBroadcaster:
 
         self._events_by_run[run_id].append(event)
 
-        # Notify any active SSE listeners
+        # Notify any active legacy SSE listeners
         if run_id in self._listeners_by_run:
             for q in self._listeners_by_run[run_id]:
                 try:
                     q.put_nowait(event)
                 except asyncio.QueueFull:
                     pass
+
+        # Notify any active bounded EventSubscribers
+        if run_id in self._subscribers_by_run:
+            for sub in list(self._subscribers_by_run[run_id]):
+                try:
+                    sub.queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    sub.overflowed = True
 
         # Persist event to audit store if available
         if self._audit_store:
@@ -109,9 +125,26 @@ class EventBroadcaster:
         return event
 
     def get_events(self, run_id: str) -> List[RunEvent]:
-        return self._events_by_run.get(run_id, [])
+        return list(self._events_by_run.get(run_id, []))
+
+    def register_subscriber(self, run_id: str, maxsize: int = 100) -> EventSubscriber:
+        """Registers a bounded SSE subscriber with overflow tracking."""
+        if run_id not in self._subscribers_by_run:
+            self._subscribers_by_run[run_id] = []
+        sub = EventSubscriber(maxsize=maxsize)
+        self._subscribers_by_run[run_id].append(sub)
+        return sub
+
+    def unregister_subscriber(self, run_id: str, sub: EventSubscriber):
+        """Unregisters an SSE subscriber."""
+        if run_id in self._subscribers_by_run:
+            if sub in self._subscribers_by_run[run_id]:
+                self._subscribers_by_run[run_id].remove(sub)
+            if not self._subscribers_by_run[run_id]:
+                self._subscribers_by_run.pop(run_id, None)
 
     def register_listener(self, run_id: str) -> asyncio.Queue:
+        """Legacy registration returning an asyncio.Queue."""
         if run_id not in self._listeners_by_run:
             self._listeners_by_run[run_id] = []
         q = asyncio.Queue(maxsize=100)
@@ -119,13 +152,18 @@ class EventBroadcaster:
         return q
 
     def unregister_listener(self, run_id: str, q: asyncio.Queue):
+        """Legacy unregistration."""
         if run_id in self._listeners_by_run:
             if q in self._listeners_by_run[run_id]:
                 self._listeners_by_run[run_id].remove(q)
+            if not self._listeners_by_run[run_id]:
+                self._listeners_by_run.pop(run_id, None)
 
     def reset(self):
+        """Resets all in-memory events and listeners."""
         self._events_by_run.clear()
         self._listeners_by_run.clear()
+        self._subscribers_by_run.clear()
 
 
 event_broadcaster = EventBroadcaster()

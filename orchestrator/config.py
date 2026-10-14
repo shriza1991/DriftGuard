@@ -11,6 +11,7 @@ class OrchestratorSettings(BaseSettings):
     model_api_key: Optional[str] = None
     sqlite_db_path: str = "driftguard.sqlite3"
     log_level: str = "INFO"
+    cors_origins: list[str] = ["*"]
 
     model_config = SettingsConfigDict(
         env_prefix="ORCHESTRATOR_",

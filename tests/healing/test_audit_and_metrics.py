@@ -623,6 +623,10 @@ async def test_demo_reset_preserves_persistent_history(audit_store: SQLiteAuditS
         verified_outcome={"preserved": True}, termination_reason="completed"
     )
 
+    from mock_api.app import app as mock_app
+    from orchestrator.client.mock_client import MockAdminApiClient
+    app.state.admin_client = MockAdminApiClient(transport=httpx.ASGITransport(app=mock_app))
+
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         res = await client.post("/demo/reset")
