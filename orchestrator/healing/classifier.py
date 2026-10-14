@@ -71,6 +71,7 @@ def _evaluate_retry_safety(
             uncertain_write=True,
             idempotent_method=is_idemp,
             requires_input_adaptation=False,
+            safe_if_adapted=False,
         )
 
     # 2. Pre-execution failures (rejected before HTTP dispatch)
@@ -85,6 +86,7 @@ def _evaluate_retry_safety(
             uncertain_write=False,
             idempotent_method=is_idemp,
             requires_input_adaptation=True,
+            safe_if_adapted=True,
         )
 
     # 3. Post-write response parsing failure
@@ -95,6 +97,7 @@ def _evaluate_retry_safety(
             uncertain_write=True,
             idempotent_method=is_idemp,
             requires_input_adaptation=False,
+            safe_if_adapted=False,
         )
 
     # 4. Authentication / Authorization requirement
@@ -105,6 +108,7 @@ def _evaluate_retry_safety(
             uncertain_write=observation.uncertain_write,
             idempotent_method=is_idemp,
             requires_input_adaptation=True,
+            safe_if_adapted=(not observation.uncertain_write),
         )
 
     # 5. Downstream schema drift on writes
@@ -115,6 +119,7 @@ def _evaluate_retry_safety(
             uncertain_write=False,
             idempotent_method=is_idemp,
             requires_input_adaptation=True,
+            safe_if_adapted=True,
         )
 
     # 6. Transient service failures on idempotent reads
@@ -126,6 +131,7 @@ def _evaluate_retry_safety(
                 uncertain_write=False,
                 idempotent_method=True,
                 requires_input_adaptation=False,
+                safe_if_adapted=False,
             )
         else:
             return RetrySafety(
@@ -134,15 +140,18 @@ def _evaluate_retry_safety(
                 uncertain_write=observation.write_attempted,
                 idempotent_method=False,
                 requires_input_adaptation=False,
+                safe_if_adapted=False,
             )
 
     # 7. Default for business rule, auth, invalid input, or ambiguous
+    requires_adapt = (category in [SemanticFailureCategory.INVALID_INPUT, SemanticFailureCategory.SCHEMA_DRIFT])
     return RetrySafety(
         safe_to_retry=False,
         reason=f"Operation cannot be retried safely under category '{category.value}'. Repeating call requires input or schema adaptation.",
         uncertain_write=observation.uncertain_write,
         idempotent_method=is_idemp,
-        requires_input_adaptation=(category in [SemanticFailureCategory.INVALID_INPUT, SemanticFailureCategory.SCHEMA_DRIFT]),
+        requires_input_adaptation=requires_adapt,
+        safe_if_adapted=(requires_adapt and not observation.uncertain_write),
     )
 
 
@@ -341,9 +350,10 @@ def _classify_internal(observation: FailureObservation) -> ClassificationResult:
 
         # Check for documented missing business resource
         is_known_resource_missing = (
-            code_str in ["TICKET_NOT_FOUND", "USER_NOT_FOUND", "RESOURCE_NOT_FOUND"]
-            or bool(re.search(r"\b(ticket|user)\s+\d+\s+not\s+found\b", msg_str, re.IGNORECASE))
-            or bool(re.search(r"\buser\s+['\"][^'\"]+['\"]\s+not\s+found\b", msg_str, re.IGNORECASE))
+            code_str in ["TICKET_NOT_FOUND", "USER_NOT_FOUND", "RESOURCE_NOT_FOUND", "NOT_FOUND"]
+            or (bool(code_str) and "NOT_FOUND" in code_str)
+            or bool(re.search(r"\b(ticket|user|resource|entity|account)\s+['\"]?[\w-]+['\"]?\s+not\s+found\b", msg_str, re.IGNORECASE))
+            or bool(re.search(r"\b(ticket|user|resource)\s+with\s+id\s+['\"]?[\w-]+['\"]?\s+not\s+found\b", msg_str, re.IGNORECASE))
         )
 
         if is_known_resource_missing:

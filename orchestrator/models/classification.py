@@ -27,10 +27,16 @@ class RetrySafety(BaseModel):
     uncertain_write: bool = False
     idempotent_method: bool = False
     requires_input_adaptation: bool = False
+    safe_if_adapted: bool = False
 
     @property
     def retry_reason(self) -> str:
         return self.reason
+
+    @property
+    def is_useless_unchanged_retry(self) -> bool:
+        """Indicates that repeating the identical payload unchanged is guaranteed to fail."""
+        return not self.safe_to_retry and self.requires_input_adaptation
 
 
 class ClassificationResult(BaseModel):

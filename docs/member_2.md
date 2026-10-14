@@ -143,29 +143,44 @@
 
 ---
 
+- [x] **Task 6: Deterministic Repair Proposals (`orchestrator/healing/planner.py`)**:
+  - `orchestrator/models/proposal.py`: Strongly typed `PlanningStatus` (`proposed`, `insufficient_evidence`, `unsupported`, `not_eligible`), `PlannedOperation` (with operation type, source path, target path, conversion policy, credential reference, value provenance, and evidence path), and `PlanningResult`.
+  - `orchestrator/healing/planner.py` (`plan_repair`): Deterministic planner operating strictly on observable runtime evidence without LLM calls, mock admin state, or evaluation scenario answers.
+  - Eligibility & Identity Gating: Requires `classification.diagnosis_eligible == True` (`category == 'schema_drift'`) and matching tool snapshot identity (`name`, `version`, canonical SHA-256 `fingerprint`). Stale or mismatched evidence safely returns `not_eligible`.
+  - Evidence Grammar Normalization:
+    - Normalizes explicit source-to-target migration mappings, structured expected types, and newly required headers.
+    - Free-text keyword similarity alone cannot authorize proposals.
+    - Missing fields alone without correspondence evidence return `insufficient_evidence` (never assumes rename correspondence).
+    - Newly required business values with no caller source return `unsupported` (inventing data is strictly forbidden).
+    - Unapproved required headers return `unsupported` (credentials cannot be fabricated or permissions bypassed).
+  - Restricted Safe Operations: Formulates `RENAME_ARGUMENT`, `NEST_ARGUMENT`, `CAST_TYPE`, and `SET_HEADER` operations while keeping source argument paths, wire request paths, and schema paths distinct. Original caller inputs (`ticket_id: 81`, `user_id: "123"`) remain strictly immutable.
+  - Candidate Preview Generation: Generates defensively copied `ToolDefinition` with updated `request_mapping` and `headers` labeled `proposed_unvalidated`. Does not write to registry.
+  - Deterministic Proposal Fingerprint: SHA-256 fingerprint over canonical plan elements excluding timestamps, random IDs, or secret credentials.
+  - Targeted Test Suite (`tests/healing/test_repair_proposals.py`): 15 comprehensive unit tests covering explicit renames, nested paths, type casts, approved vs. unapproved headers, combined compositions, missing fields without correspondence, missing business values, destination collisions, stale snapshot gating, distinct path layers, immutability of inputs/registry, deterministic ordering/fingerprinting, zero secrets leakage, frozen observation immutability, and unvalidated `patch_proposed` event emission.
+  - Full Regression Verification: All 83 backend tests (`tests/mock_api`, `tests/evaluation`, `tests/healing`) passing cleanly.
+
+---
+
 ## 4. Next Tasks
 
-- [ ] **Task 6: Deterministic Repair Proposals (`orchestrator/healing/repair.py`)**:
-  - Formulate deterministic, statically verified argument translation proposals (`rename_argument`, `cast_type`, `nest_argument`, `set_header`) for candidates classified as `SCHEMA_DRIFT`.
-  - Authorize proposals against safety constraints; business intent parameters (`ticket_id`, `user_id`) remain strictly immutable.
-  - Retain repair and patch staging as explicitly pending execution.
-
 - [ ] **Task 7: Safety Validation & Invariants (`orchestrator/healing/validator.py`)**:
+  - Statically verify proposed patches against strict safety constraints before any live execution.
   - Verify proposed patch does not invent new business arguments (e.g. `priority_tier`).
   - Verify no lossy conversions or unapproved domain redirects.
   - Keep caller arguments immutable.
+  - Authorize or reject proposals with typed `PatchDecision`.
 
-- [ ] **Task 8: Staged Patch & Verified Execution (`orchestrator/healing/recovery.py`)**:
-  - Stage the proposed patch in memory with per-tool lock.
+- [ ] **Task 8: Staged Patch & Verified Recovery Execution (`orchestrator/healing/recovery.py`)**:
+  - Stage the authorized patch in memory with per-tool lock.
   - Execute exactly ONE retry call with idempotency key.
   - If retry succeeds, perform independent read verification via `GET /tickets/81`.
   - Discard candidate patch if retry or read verification fails.
 
-- [ ] **Task 8: Registry Hot-Commit & Second-Call Reuse**:
+- [ ] **Task 9: Registry Hot-Commit & Second-Call Reuse**:
   - Hot-commit verified patch into active tool registry.
   - Verify that subsequent calls to `assign_ticket` in future runs automatically reuse the updated contract without reparsing or re-diagnosing.
 
-- [ ] **Task 9: Audit & Token Tracking**:
+- [ ] **Task 10: Audit & Token Tracking**:
   - Log every diagnosis step and patch commit into `orchestrator/audit/logger.py`.
   - Track real model tokens used during repair planning.
 

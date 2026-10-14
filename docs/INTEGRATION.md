@@ -294,23 +294,58 @@ class FailureObservation(BaseModel):
 
 ---
 
-## 7. Contract Gaps & Coordination Handoffs
+## 7. Deterministic Repair Proposals (Member 2 Task 6)
 
-### 7.1 For Member 1 (Mock API & Mutations) — Evidence Requirements
-To enable deterministic schema drift classification without inspecting mock admin state or hidden scenario answers:
-1. **Structured Schema Validation Errors**:
-   - Downstream 400/422 validation rejections should include structured keys in response JSON:
-     `{"error": {"category": "schema_mismatch", "details": {"missing": [...], "unexpected": [...]}, "migration_hint": "..."}}`.
-   - Bare 400/422 responses without structured schema details will be safely degraded to `ambiguous`.
-2. **Missing Field vs. Rename Correspondence**:
-   - An observed missing field error (e.g. `missing: ["assignee_id"]`) does **not** alone prove that `user_id` should be renamed to `assignee_id`. Semantic correspondence requires explicit migration hints or diagnostic validation.
-3. **Newly Required Header Signals**:
-   - If a mutation introduces a newly required header, returning `401/422` with `{"error": {"code": "MISSING_HEADER", "details": {"required_headers": ["X-Org-Token"]}}}` allows DriftGuard to classify it as header drift candidate.
-   - Note: DriftGuard will diagnose header structure, but will never fabricate credentials or bypass permissions.
-4. **Idempotency Guarantees**:
-   - Confirm server-side deduplication semantics for `POST /tickets/assign` when `Idempotency-Key` is supplied.
+### 7.1 Proposal Models & Status (`PlanningStatus`)
+```python
+class PlanningStatus(str, Enum):
+    PROPOSED = "proposed"                       # Evidence is complete; coherent plan formulated
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence" # Missing correspondence or schema details
+    UNSUPPORTED = "unsupported"                 # Unapproved header, invented business value, or collision
+    NOT_ELIGIBLE = "not_eligible"               # Ineligible failure category or stale snapshot
+```
 
-### 7.2 For Member 3 (Frontend & SSE Events) — Representative Event Payloads
+### 7.2 Path Semantics & Distinct Layers
+DriftGuard strictly separates three distinct layers of paths:
+1. **Source Argument Path**: The caller's original business parameter (`user_id`, `ticket_id`). Original caller arguments remain **strictly immutable**.
+2. **Wire Request Path**: The HTTP request wire structure (`body["assignee_id"]`, `body["target"]["id"]`, `headers["Authorization"]`). Updated via `request_mapping`.
+3. **Argument Schema Path**: The local input validation contract in `argument_schema.properties`.
+
+### 7.3 Supported Evidence Grammar
+The planner normalizes only documented, machine-readable evidence:
+- **Explicit Field Migration**:
+  - `details.migration_mapping = {"user_id": "assignee_id"}`
+  - Structured machine-readable hint: `"Field 'user_id' is deprecated. Expected 'assignee_id'."` or `"user_id is now nested under target.id"`.
+- **Expected Schema Types**:
+  - `details.expected_schema = {"ticket_id": "integer", "target": {"id": "integer"}}`
+  - Declared conversion policy: `"string_to_integer"`
+- **Required Headers**:
+  - `details.required_headers = ["Authorization"]` or `["X-Org-Token"]`
+  - Must map to a pre-approved credential reference name (`approved_header_credentials = {"Authorization": "secops_auth"}`).
+
+### 7.4 Task 7 Validation Requirements
+Proposals generated in Task 6 are declarative candidates labeled `status: "proposed_unvalidated"`. Task 7 must statically verify:
+1. `verify_caller_argument_immutability`: Caller arguments (`ticket_id: 81`, `user_id: "123"`) must not be mutated or dropped.
+2. `verify_no_invented_business_values`: The patch must never invent artificial IDs, priorities, or flags.
+3. `verify_lossless_type_conversion`: Type conversions must be safe and lossless (e.g. numeric string `"123"` to `123`).
+4. `verify_approved_credential_resolution`: Headers must map to approved credential references without fabricating secrets.
+5. `verify_idempotent_retry_safety`: Uncertain writes (`uncertain_write == True`) must never be retried.
+
+---
+
+## 8. Contract Gaps & Coordination Handoffs
+
+### 8.1 For Member 1 (Mock API & Mutations) — Proposal Evidence & Refusal Examples
+The deterministic planner enforces strict evidence requirements:
+1. **Missing Field Alone Refusal (`insufficient_evidence`)**:
+   - If mock returns `{"error": {"details": {"missing": ["assignee_id"]}}}`, DriftGuard **refuses** to guess that `assignee_id` replaces `user_id`.
+   - **Requirement**: Provide explicit correspondence: `details.migration_mapping = {"user_id": "assignee_id"}` or `migration_hint = "Use assignee_id instead of user_id"`.
+2. **Unapproved Required Header Refusal (`unsupported`)**:
+   - If mock returns `401` with `required_headers = ["X-Custom-Secret"]` and that header is not in approved orchestrator configuration, DriftGuard **refuses**. Credentials cannot be fabricated.
+3. **Newly Required Business Parameter Refusal (`unsupported`)**:
+   - If mock returns `missing: ["priority_tier"]`, DriftGuard **refuses**. The agent cannot invent ungrounded business values.
+
+### 8.2 For Member 3 (Frontend & SSE Events) — Representative Event Payloads
 
 #### Representative `tool_call_failed` Event Payload with Classification:
 ```json
@@ -336,33 +371,53 @@ To enable deterministic schema drift classification without inspecting mock admi
 }
 ```
 
-#### Representative `tool_call_failed` for Ambiguous Bare 422:
+#### Representative `patch_proposed` Event Payload (Unvalidated Candidate):
 ```json
 {
   "run_id": "run-48afbc29-7981-420a",
-  "sequence": 4,
-  "timestamp": "2026-10-14T12:00:01.120Z",
-  "mode": "normal",
-  "type": "tool_call_failed",
+  "sequence": 5,
+  "timestamp": "2026-10-14T12:00:01.350Z",
+  "mode": "healing",
+  "type": "patch_proposed",
   "tool": "assign_ticket",
   "data": {
-    "status_code": 422,
-    "error_code": "UNPROCESSABLE_ENTITY",
-    "message": "Unprocessable entity",
-    "uncertain_write": false,
-    "classification": {
-      "category": "ambiguous",
-      "diagnosis_eligible": false,
-      "safe_to_retry": false,
-      "retry_reason": "Operation cannot be retried safely under category 'ambiguous'."
-    }
+    "proposal_id": "prop-b4f2c8d19a02",
+    "tool": "assign_ticket",
+    "base_version": "1.0.0",
+    "target_version": "1.1.0",
+    "proposal_fingerprint": "b4f2c8d19a02ec71",
+    "status": "unvalidated_proposal",
+    "validation_required": true,
+    "operations": [
+      {
+        "operation_type": "set_header",
+        "source_path": null,
+        "target_path": "Authorization",
+        "conversion_policy": null,
+        "credential_reference": "secops_auth"
+      },
+      {
+        "operation_type": "nest_argument",
+        "source_path": "user_id",
+        "target_path": "target.id",
+        "conversion_policy": null,
+        "credential_reference": null
+      },
+      {
+        "operation_type": "cast_type",
+        "source_path": "user_id",
+        "target_path": "target.id",
+        "conversion_policy": "string_to_integer",
+        "credential_reference": null
+      }
+    ]
   }
 }
 ```
 
 ---
 
-## 8. Server-Sent Events (SSE) Contract & Public Examples (For Member 3)
+## 9. Server-Sent Events (SSE) Contract & Public Examples (For Member 3)
 
 Each event emitted across `/runs/{run_id}/events` strictly conforms to `contracts/events.schema.json`.
 All secrets in `data` are recursively redacted with `[REDACTED]` prior to emission.

@@ -8,7 +8,8 @@ Adheres strictly to Member 2 safety invariants:
 from typing import Optional, Dict, Any, List
 from enum import Enum
 from datetime import datetime, timezone
-from pydantic import BaseModel, Field
+import copy
+from pydantic import BaseModel, Field, model_validator
 
 from orchestrator.models import OperationIdentity, TimingInfo
 
@@ -49,6 +50,14 @@ class FailureObservation(BaseModel):
     raw_error_message: Optional[str] = None
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
+    @model_validator(mode="before")
+    @classmethod
+    def _deep_copy_inputs(cls, data: Any) -> Any:
+        import copy
+        if isinstance(data, dict):
+            return copy.deepcopy(data)
+        return data
+
     @property
     def phase(self) -> ExecutionPhase:
         return self.execution_phase
@@ -56,4 +65,17 @@ class FailureObservation(BaseModel):
     @property
     def registry_fingerprint(self) -> str:
         return self.fingerprint
+
+    def __getattribute__(self, name: str) -> Any:
+        val = super().__getattribute__(name)
+        if name in [
+            "original_arguments",
+            "request_evidence",
+            "response_evidence",
+            "validation_details",
+            "evidence_paths",
+        ]:
+            if isinstance(val, (dict, list)):
+                return copy.deepcopy(val)
+        return val
 

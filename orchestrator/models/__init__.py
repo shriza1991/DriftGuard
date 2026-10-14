@@ -196,3 +196,6 @@ class PatchDecision(BaseModel):
     reasons: List[str] = Field(default_factory=list)
     safety_violations: List[str] = Field(default_factory=list)
     decided_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+from orchestrator.models.proposal import PlanningStatus, PlannedOperation, PlanningResult

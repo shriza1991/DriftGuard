@@ -95,6 +95,20 @@
 - **Decision**: Retry safety is modeled independently from diagnosis eligibility via `RetrySafety`. Diagnosis eligibility indicates whether a candidate patch can be derived from the evidence; `RetrySafety.safe_to_retry` evaluates whether repeating the request is safe. Uncertain writes are strictly marked `safe_to_retry: false` regardless of diagnosis eligibility, and idempotency keys alone do not authorize unverified writes.
 - **Rationale**: Eliminates dangerous race conditions and write corruption on downstream systems.
 
+## ADR-020: Deterministic Evidence-Backed Repair Planning and Proposal Isolation
+- **Context**: When API schema drift occurs, arbitrary heuristics or ungrounded generative proposals could invent parameters, corrupt business intent, or introduce unauthorized changes into the tool registry.
+- **Decision**: Repair proposal generation (`orchestrator/healing/planner.py`) is deterministic, evidence-backed, and strictly declarative. It operates solely on observable runtime evidence (`FailureObservation`, `ClassificationResult`) and read-only approved credential reference configurations. Out-of-band knowledge (admin state, mock code, mutation names) is strictly forbidden. Proposals generate isolated candidate previews with status `proposed_unvalidated` and perform zero registry commits or staging.
+- **Rationale**: Keeps proposal generation auditable, reproducible, and verifiable before Task 7 static safety validation and Task 8 recovery execution.
+
+## ADR-021: Strict Separation of Caller Argument Identity, Wire Request Paths, and Schema Paths
+- **Context**: Tools interface between agent callers and downstream HTTP APIs. Conflating caller arguments with HTTP wire payload structures leads to brittle mutations where the caller's interface is unnecessarily broken or corrupted.
+- **Decision**: Clearly distinguish three path categories:
+  1. **Caller Argument Paths**: Immutable business parameters provided by the agent (e.g. `user_id: "123"`).
+  2. **Wire Request Paths**: Downstream HTTP request payload structure (e.g. `request_mapping.body["target"]["id"]`).
+  3. **Argument Schema Paths**: JSON schema definitions declaring acceptable caller parameter names and types.
+  Drift adaptations primarily modify `request_mapping` to bridge unchanged caller arguments to downstream wire changes. Argument schemas are updated only when contract types or caller parameters genuinely change.
+- **Rationale**: Preserves the immutability of business intent (AGENTS.md Invariant 3) while accommodating complex wire structural drifts like nested objects or renamed fields.
+
 ---
 
 ## Technical Clarifications & Invariant Reminders
@@ -103,5 +117,6 @@
 > **Observation vs. Proof**:
 > 1. `expected_schema` alone in an error response does **not** establish semantic field correspondence (e.g. that `assignee_id` corresponds to `user_id`).
 > 2. An HTTP `401 Unauthorized` or `422 Unprocessable Content` status alone does **not** prove contract drift (it may indicate genuine authorization failure or bad caller intent).
-> 3. Classification, diagnosis, and transformation inference remain explicitly pending for future tasks and must not be assumed during registry operations.
+> 3. Proposed repair candidates remain strictly `proposed_unvalidated` until validated by Task 7 and staged/committed by Task 8.
+
 
