@@ -5,7 +5,7 @@ Supports 8 canonical drift scenarios:
 1. rename: 'user_id' renamed to 'assignee_id'
 2. type_change: 'ticket_id' or 'user_id' expects integer vs string
 3. nesting: 'user_id' moved inside nested 'target': {'id': ...}
-4. required_header: 'X-API-Version' or 'Authorization' required
+4. required_header: configured 'Authorization' credential required
 5. combined: nesting + type_change + required_header
 6. missing_business_value: requires a field not present in initial agent prompt (e.g. 'priority_tier')
 7. unavailable_credential: requires a credential token not available in vault
