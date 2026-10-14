@@ -66,6 +66,9 @@ class RecoveryResult(BaseModel):
     committed_version: Optional[str] = None
     committed_fingerprint: Optional[str] = None
     business_effect_occurred: bool = False
+    write_accepted: bool = False
+    uncertain_write: bool = False
+    audit_incomplete: bool = False
     verification_succeeded: bool = False
     registry_committed: bool = False
     execution_result: Optional[ExecutionResult] = None
@@ -98,7 +101,7 @@ async def default_verify_business_intent(
     """
     if tool_name == "assign_ticket":
         expected_ticket = original_arguments.get("ticket_id")
-        expected_user = original_arguments.get("user_id") or original_arguments.get("assignee_id")
+        expected_user = original_arguments.get("user_id") or original_arguments.get("assignee_id") or original_arguments.get("target", {}).get("id")
 
         if expected_ticket is None or expected_user is None:
             return {
@@ -174,7 +177,7 @@ class RecoveryController:
         self.verifier = verifier or default_verify_business_intent
         self.events = event_broadcaster or globals()["event_broadcaster"]
         self.approved_header_credentials = approved_header_credentials or {}
-        self.credential_resolver = credential_resolver
+        self.credential_resolver = credential_resolver or (lambda ref: bool(self.executor.client.credential_resolver(ref)))
         self.execution_guarantees = execution_guarantees or {}
         self.llm_diagnoser = llm_diagnoser
         self.diagnosis_timeout = diagnosis_timeout
@@ -186,12 +189,14 @@ class RecoveryController:
         self._diagnosed_operations: Set[str] = set()
         # Track operations that have had a repaired dispatch (max 1 repaired dispatch per operation)
         self._dispatched_operations: Set[str] = set()
+        self._recovery_operations: Set[str] = set()
 
     def reset_operation_tracking(self) -> None:
         """Clears operation tracking sets for demo reset."""
         self._attempted_proposals.clear()
         self._diagnosed_operations.clear()
         self._dispatched_operations.clear()
+        self._recovery_operations.clear()
 
 
     def _emit_event(
@@ -250,26 +255,61 @@ class RecoveryController:
                 commit_latency_ms=res.commit_latency_ms,
                 failed_recovery_duration_ms=res.failed_recovery_duration_ms,
             )
-            if res.diagnosis_tokens > 0:
+            if res.diagnosis_source == "llm_assisted":
                 diag_inp = res.diagnosis_token_details.get("input_tokens") if res.diagnosis_token_details else None
                 diag_out = res.diagnosis_token_details.get("output_tokens") if res.diagnosis_token_details else None
                 await self.audit_store.record_model_usage(
                     run_id=run_id,
-                    call_id=f"diag-{res.proposal_fingerprint[:8] if res.proposal_fingerprint else res.tool_name}",
+                    call_id=f"diag-{res.candidate_id or res.proposal_fingerprint or res.tool_name}",
                     purpose="diagnosis",
                     prompt_tokens=diag_inp,
                     completion_tokens=diag_out,
                     total_tokens=res.diagnosis_tokens,
-                    is_complete=True,
+                    is_complete=bool(res.diagnosis_token_details and res.diagnosis_token_details.get("is_complete", True)),
                 )
         except Exception:
-            if res.business_effect_occurred:
+            res.audit_incomplete = True
+            if True:
                 try:
                     await self.audit_store.mark_audit_incomplete(run_id)
                 except Exception:
                     pass
 
-    async def recover_failure(
+    async def recover_failure(self, observation, original_arguments, operation_identity, run_id,
+                              deadline=None, mode="healing") -> RecoveryResult:
+        """deadline is remaining seconds and covers lock, diagnosis, dispatch and verification."""
+        budget = 30.0 if deadline is None else max(0.0, deadline)
+        key = operation_identity.key if operation_identity else "unidentified"
+        start = time.perf_counter()
+        try:
+            async with asyncio.timeout(budget):
+                result = await self._recover_failure(observation, original_arguments, operation_identity,
+                    run_id, deadline=budget, mode=mode)
+        except TimeoutError:
+            result = RecoveryResult(status=RecoveryStatus.TIMEOUT, recovered=False,
+                tool_name=observation.tool_name, base_version=observation.registry_version,
+                base_fingerprint=observation.fingerprint, uncertain_write=key in self._dispatched_operations,
+                termination_reason="Overall recovery deadline exceeded; dispatched write may be uncertain")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            result = RecoveryResult(status=RecoveryStatus.EXECUTION_FAILED, recovered=False,
+                tool_name=observation.tool_name, base_version=observation.registry_version,
+                base_fingerprint=observation.fingerprint, uncertain_write=key in self._dispatched_operations,
+                termination_reason="Recovery interrupted by internal execution/audit failure; no further write allowed")
+        if result.status != RecoveryStatus.RECOVERED and result.failed_recovery_duration_ms is None:
+            result.failed_recovery_duration_ms = round((time.perf_counter() - start) * 1000, 2)
+        if self.audit_store:
+            try:
+                records = await self.audit_store.get_run_repair_attempts(run_id)
+                fingerprint = result.proposal_fingerprint or f"fp_none_{result.tool_name}"
+                if not any(r.tool_name == result.tool_name and r.proposal_fingerprint == fingerprint for r in records):
+                    await self._audit_repair_attempt(run_id, result)
+            except Exception:
+                result.audit_incomplete = True
+        return result
+
+    async def _recover_failure(
         self,
         observation: FailureObservation,
         original_arguments: Dict[str, Any],
@@ -287,11 +327,7 @@ class RecoveryController:
         # Calculate remaining time from deadline
         timeout_budget: Optional[float] = None
         if deadline is not None:
-            # If deadline is given as a duration (e.g. 30.0) vs timestamp
-            if deadline < 1000000000.0:
-                timeout_budget = deadline
-            else:
-                timeout_budget = max(0.0, deadline - time.time())
+            timeout_budget = max(0.0, deadline)
             if timeout_budget <= 0.0:
                 return RecoveryResult(
                     status=RecoveryStatus.TIMEOUT,
@@ -307,7 +343,7 @@ class RecoveryController:
         # 1. Eligibility Check
         # ---------------------------------------------------------------------
         op_key = operation_identity.key if operation_identity else f"{tool_name}:{base_fp}"
-        if op_key in self._dispatched_operations:
+        if op_key in self._recovery_operations:
             return RecoveryResult(
                 status=RecoveryStatus.PLANNING_FAILED,
                 recovered=False,
@@ -399,11 +435,8 @@ class RecoveryController:
         verif_data: Optional[Dict[str, Any]] = None
 
         try:
-            lock_coro = lock.acquire()
-            if timeout_budget is not None:
-                await asyncio.wait_for(lock_coro, timeout=timeout_budget)
-            else:
-                await lock_coro
+            # Keep task ownership intact on Python 3.11; outer timeout covers lock wait.
+            await lock.acquire()
 
             try:
                 # -------------------------------------------------------------
@@ -437,6 +470,12 @@ class RecoveryController:
                         ),
                         duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
                     )
+
+                if op_key in self._recovery_operations:
+                    return RecoveryResult(status=RecoveryStatus.PLANNING_FAILED, recovered=False,
+                        tool_name=tool_name, base_version=base_version, base_fingerprint=base_fp,
+                        termination_reason="Recovery already attempted for logical operation")
+                self._recovery_operations.add(op_key)
 
                 # -------------------------------------------------------------
                 # 4. Pure Deterministic Proposal Formulation (with bounded LLM fallback)
@@ -664,6 +703,7 @@ class RecoveryController:
 
                 exec_ctx = ExecutionContext(
                     run_id=run_id,
+                    tool_call_id=operation_identity.tool_call_id,
                     idempotency_key=operation_identity.idempotency_key,
                     candidate_snapshot=candidate_tool,
                 )
@@ -674,6 +714,15 @@ class RecoveryController:
                     context=exec_ctx,
                     candidate_snapshot=candidate_tool,
                 )
+
+                if self.audit_store:
+                    await self.audit_store.record_tool_execution(run_id=run_id,
+                        tool_call_id=operation_identity.tool_call_id or operation_identity.key,
+                        tool_name=tool_name, tool_version=candidate_tool.version,
+                        fingerprint=candidate_tool.fingerprint, attempt_number=2, is_repaired=True,
+                        arguments=val_result.transformed_arguments, status="success" if executed_res.is_success else "failed",
+                        result=executed_res.outcome, failure=executed_res.failure.model_dump() if executed_res.failure else None,
+                        timing=executed_res.timing.model_dump(), operation_identity=operation_identity.key)
 
                 if not executed_res.is_success:
                     err_msg = executed_res.failure.message if executed_res.failure else "Repaired execution failed"
@@ -730,7 +779,7 @@ class RecoveryController:
                     return res
 
                 # HTTP write succeeded downstream! Record separate business outcome.
-                business_effect_occurred = True
+                business_effect_occurred = False
 
                 # -------------------------------------------------------------
                 # 8. Independent Business Intent Verification
@@ -754,7 +803,9 @@ class RecoveryController:
                         base_fingerprint=active_fp,
                         proposal_fingerprint=proposal_fp,
                         candidate_id=staged_candidate_id,
-                        business_effect_occurred=True,
+                        business_effect_occurred=False,
+                        write_accepted=True,
+                        uncertain_write=True,
                         verification_succeeded=False,
                         registry_committed=False,
                         execution_result=executed_res,
@@ -777,6 +828,7 @@ class RecoveryController:
                     return res
 
                 verification_succeeded = True
+                business_effect_occurred = is_write
                 verif_end_time = time.perf_counter()
                 recovery_duration_ms = round((verif_end_time - start_time) * 1000, 2)
 

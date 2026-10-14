@@ -68,10 +68,14 @@ class BaselineAgent:
     def _extract_task_intent(self, task: str) -> Dict[str, Any]:
         """Extracts expected target ticket ID and user name from task description string."""
         ticket_match = re.search(r"ticket\s*(\d+)", task, re.IGNORECASE)
-        target_ticket = int(ticket_match.group(1)) if ticket_match else 81
+        if ticket_match is None:
+            raise ValueError("Task must explicitly identify a ticket")
+        target_ticket = int(ticket_match.group(1))
 
         user_match = re.search(r"find\s+([A-Za-z]+)", task, re.IGNORECASE)
-        target_user_name = user_match.group(1) if user_match else "Maya"
+        if user_match is None:
+            raise ValueError("Prototype task must explicitly say Find <name>")
+        target_user_name = user_match.group(1)
 
         return {
             "ticket_id": target_ticket,
@@ -225,26 +229,30 @@ class BaselineAgent:
                 else None
             )
             if usage and isinstance(usage, dict):
-                in_tok = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
-                out_tok = usage.get("output_tokens") or usage.get("completion_tokens") or 0
+                raw_in = usage.get("input_tokens", usage.get("prompt_tokens"))
+                raw_out = usage.get("output_tokens", usage.get("completion_tokens"))
+                complete_usage = isinstance(raw_in, int) and isinstance(raw_out, int)
+                has_token_usage = has_token_usage and complete_usage
+                in_tok = raw_in if isinstance(raw_in, int) else 0
+                out_tok = raw_out if isinstance(raw_out, int) else 0
                 total_input_tokens += in_tok
                 total_output_tokens += out_tok
                 if self.audit_store:
                     await self.audit_store.record_model_usage(
                         run_id=run_id,
-                        call_id=f"turn-{turns_executed}",
+                        call_id=f"turn-{turn}",
                         purpose="agent_turn",
-                        prompt_tokens=in_tok,
-                        completion_tokens=out_tok,
-                        total_tokens=in_tok + out_tok,
-                        is_complete=True,
+                        prompt_tokens=raw_in,
+                        completion_tokens=raw_out,
+                        total_tokens=in_tok + out_tok if complete_usage else None,
+                        is_complete=complete_usage,
                     )
             else:
                 has_token_usage = False
                 if self.audit_store:
                     await self.audit_store.record_model_usage(
                         run_id=run_id,
-                        call_id=f"turn-{turns_executed}",
+                        call_id=f"turn-{turn}",
                         purpose="agent_turn",
                         prompt_tokens=None,
                         completion_tokens=None,
@@ -311,6 +319,14 @@ class BaselineAgent:
                 # Retrieve frozen v1 snapshot
                 frozen_tool = self.catalogue[tool_name]
 
+                if tool_name == "assign_ticket":
+                    supplied_user = tool_args.get("user_id", tool_args.get("assignee_id", tool_args.get("target", {}).get("id")))
+                    if resolved_user_id is None or str(supplied_user) != str(resolved_user_id) or tool_args.get("ticket_id") != target_ticket:
+                        message = "Assignment does not match independently resolved task intent; resolve the requested user first"
+                        messages.append(ToolMessage(content=json.dumps({"error": message}), tool_call_id=tool_call_id, name=tool_name))
+                        recorded_tool_calls.append({"tool_call_id": tool_call_id, "tool_name": tool_name, "arguments": redact_secrets(tool_args), "status": "intent_rejected"})
+                        continue
+
                 # Stable operation identity & Idempotency-Key on mutation writes
                 write_idemp_key: Optional[str] = None
                 if frozen_tool.method.upper() in ["POST", "PUT", "PATCH", "DELETE"]:
@@ -338,12 +354,12 @@ class BaselineAgent:
                     tool_call_id=tool_call_id,
                     idempotency_key=write_idemp_key,
                 )
-                exec_result = await executor.execute(
+                exec_result = await asyncio.wait_for(executor.execute(
                     tool_name_or_def=tool_name,
                     arguments=tool_args,
                     context=ctx,
                     candidate_snapshot=frozen_tool,
-                )
+                ), timeout=max(0.0, deadline - time.perf_counter()))
 
                 if self.audit_store:
                     await self.audit_store.record_tool_execution(
@@ -358,7 +374,7 @@ class BaselineAgent:
                         status="success" if exec_result.is_success else "failed",
                         result=exec_result.outcome or exec_result.result,
                         failure=exec_result.failure.model_dump() if exec_result.failure else None,
-                        timing={"duration_ms": exec_result.duration_ms} if exec_result else None,
+                        timing={"duration_ms": exec_result.timing.duration_ms} if exec_result else None,
                         operation_identity=exec_result.operation_identity.key if exec_result.operation_identity else None,
                     )
 
@@ -406,9 +422,11 @@ class BaselineAgent:
                         "error": redact_secrets(err_dict),
                         "uncertain_write": uncertain,
                     })
+                    if had_uncertain_write:
+                        break
                 else:
                     outcome_data = exec_result.outcome or {}
-                    if tool_name == "find_user" and "user_id" in outcome_data:
+                    if tool_name == "find_user" and "user_id" in outcome_data and str(tool_args.get("name", "")).casefold() == target_user_name.casefold():
                         resolved_user_id = str(outcome_data["user_id"])
 
                     messages.append(ToolMessage(
@@ -423,6 +441,10 @@ class BaselineAgent:
                         "status": "success",
                         "outcome": redact_secrets(outcome_data),
                     })
+
+            if had_uncertain_write:
+                termination_reason = "uncertain_write"
+                break
 
             if termination_reason in ["deadline_exceeded", "max_tool_calls_exceeded"]:
                 break
@@ -444,14 +466,18 @@ class BaselineAgent:
             run_id=run_id,
             tool_call_id=f"call-verify-{uuid.uuid4().hex[:6]}",
         )
-        read_result = await executor.execute(
-            "get_ticket",
-            {"ticket_id": target_ticket},
-            context=verify_ctx,
-            candidate_snapshot=get_ticket_tool,
-        )
+        try:
+            read_result = await asyncio.wait_for(executor.execute(
+                "get_ticket",
+                {"ticket_id": target_ticket},
+                context=verify_ctx,
+                candidate_snapshot=get_ticket_tool,
+            ), timeout=max(0.0, deadline - time.perf_counter()))
+        except asyncio.TimeoutError:
+            read_result = None
+            termination_reason = "deadline_exceeded"
 
-        if read_result.is_success and read_result.outcome:
+        if read_result is not None and read_result.is_success and read_result.outcome:
             verified_assignee_id = read_result.outcome.get("assignee_id")
             verified_ticket_id = read_result.outcome.get("ticket_id")
             ticket_status = read_result.outcome.get("status")
@@ -472,7 +498,7 @@ class BaselineAgent:
         else:
             verification_error = (
                 read_result.failure.message
-                if read_result.failure
+                if read_result is not None and read_result.failure
                 else "Independent read verification call to get_ticket failed."
             )
 

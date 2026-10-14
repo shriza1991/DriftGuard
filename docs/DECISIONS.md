@@ -230,3 +230,11 @@
 
 
 
+
+## ADR 034 Member 2 review corrections
+
+Contract transformations now change model-visible argument paths and required fields alongside HTTP mappings, with a shared restricted transformation helper and independent evidence authorization. Natural-language correspondence is checked directionally; mere co-occurrence of field names and a rename keyword is insufficient. Captured original arguments remain immutable.
+
+## ADR 035 Durable events and bounded truthful execution
+
+Live events are published after serialized persistent writes; failed writes mark audit incomplete and prevent durable replay claims. Model/recovery deadlines include verification. Admission and waiting request lifetimes do not own the managed worker. Business acceptance, verified effect and registry commit remain distinct; no fabricated defaults or missing usage counts authorize success.

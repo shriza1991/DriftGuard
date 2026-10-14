@@ -48,6 +48,7 @@ MAX_EVIDENCE_PACKET_CHARS = 4000
 
 class LLMOperationProposal(BaseModel):
     """Structured operation proposal produced by the LLM diagnoser."""
+    model_config = {"extra": "forbid"}
     operation_type: Literal["rename_argument", "nest_argument", "cast_type", "set_header"]
     source_path: Optional[str] = None
     target_path: Optional[str] = None
@@ -60,6 +61,7 @@ class LLMOperationProposal(BaseModel):
 
 class LLMDiagnosisResponse(BaseModel):
     """Structured diagnosis response expected from the LLM diagnoser."""
+    model_config = {"extra": "forbid"}
     status: Literal["proposed", "insufficient_evidence", "unsupported"]
     explanation: str = ""
     operations: List[LLMOperationProposal] = Field(default_factory=list)
@@ -254,8 +256,6 @@ class LLMDiagnoser:
             effective_timeout = min(self.timeout_sec, timeout_budget)
 
         start_time = time.perf_counter()
-        token_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-
         try:
             call_coro = self.model.ainvoke(messages)
             ai_msg: AIMessage = await asyncio.wait_for(call_coro, timeout=effective_timeout)
@@ -280,25 +280,16 @@ class LLMDiagnoser:
                 source="llm_assisted",
             )
 
-        # 5. Extract Token Usage Truthfully
-        if hasattr(ai_msg, "usage_metadata") and isinstance(ai_msg.usage_metadata, dict):
-            u = ai_msg.usage_metadata
-            token_usage = {
-                "input_tokens": u.get("input_tokens", 0),
-                "output_tokens": u.get("output_tokens", 0),
-                "total_tokens": u.get("total_tokens", 0),
-            }
-        elif hasattr(ai_msg, "response_metadata") and isinstance(ai_msg.response_metadata, dict):
-            rm = ai_msg.response_metadata
-            tu = rm.get("token_usage") or rm.get("usage") or {}
-            if isinstance(tu, dict):
-                in_tok = tu.get("prompt_tokens") or tu.get("input_tokens") or 0
-                out_tok = tu.get("completion_tokens") or tu.get("output_tokens") or 0
-                token_usage = {
-                    "input_tokens": in_tok,
-                    "output_tokens": out_tok,
-                    "total_tokens": in_tok + out_tok,
-                }
+        usage = getattr(ai_msg, "usage_metadata", None)
+        if not isinstance(usage, dict):
+            metadata = getattr(ai_msg, "response_metadata", {}) or {}
+            usage = metadata.get("token_usage") or metadata.get("usage") or {}
+        inp = usage.get("input_tokens", usage.get("prompt_tokens"))
+        out = usage.get("output_tokens", usage.get("completion_tokens"))
+        complete = isinstance(inp, int) and isinstance(out, int)
+        token_usage = {"input_tokens": inp if isinstance(inp, int) else 0,
+                       "output_tokens": out if isinstance(out, int) else 0,
+                       "total_tokens": (inp or 0) + (out or 0), "is_complete": complete}
 
         # 6. Parse and Validate Structured Output
         raw_content = ai_msg.content if isinstance(ai_msg.content, str) else str(ai_msg.content)
@@ -529,40 +520,14 @@ class LLMDiagnoser:
         raw_hash = json.dumps(plan_dict, sort_keys=True).encode("utf-8")
         prop_fp = hashlib.sha256(raw_hash).hexdigest()[:16]
 
-        # 10. Generate Candidate Preview
-        preview = snapshot.model_copy(deep=True)
-        preview.status = "proposed_unvalidated"
-        new_req_mapping = copy.deepcopy(preview.request_mapping)
-        body_mapping = new_req_mapping.get("body", {})
-
-        for op in sorted_ops:
-            if op.operation_type == RestrictedOperationType.SET_HEADER:
-                preview.headers[op.target_path] = (
-                    f"Bearer {{{op.credential_reference}}}"
-                    if "auth" in op.target_path.lower()
-                    else f"{{{op.credential_reference}}}"
-                )
-            elif op.operation_type == RestrictedOperationType.RENAME_ARGUMENT:
-                if isinstance(body_mapping, dict) and op.source_path in body_mapping:
-                    orig_val = body_mapping.pop(op.source_path)
-                    body_mapping[op.target_path] = orig_val
-            elif op.operation_type == RestrictedOperationType.NEST_ARGUMENT:
-                if isinstance(body_mapping, dict) and op.source_path in body_mapping:
-                    orig_val = body_mapping.pop(op.source_path)
-                    parts = op.target_path.split(".")
-                    curr = body_mapping
-                    for part in parts[:-1]:
-                        curr = curr.setdefault(part, {})
-                    curr[parts[-1]] = orig_val
-            elif op.operation_type == RestrictedOperationType.CAST_TYPE:
-                target_type = "integer" if "integer" in (op.conversion_policy or "").lower() else "string"
-                target_field = op.target_path or op.source_path
-                if target_field and target_field in preview.argument_schema.properties:
-                    prop = dict(preview.argument_schema.properties[target_field])
-                    prop["type"] = target_type
-                    preview.argument_schema.properties[target_field] = prop
-
-        preview.request_mapping = new_req_mapping
+        from orchestrator.healing.contract_patch import derive_contract
+        try:
+            preview, _ = derive_contract(snapshot, sorted_ops)
+            preview.status = "proposed_unvalidated"
+        except (ValueError, KeyError, TypeError) as exc:
+            return PlanningResult(status=PlanningStatus.UNSUPPORTED, tool_name=snapshot.name,
+                base_version=snapshot.version, base_fingerprint=base_fingerprint,
+                reasons=[str(exc)], source="llm_assisted", diagnosis_tokens=token_usage)
 
         # 11. Construct RepairProposal
         proposal_id = f"prop-llm-{uuid.uuid4().hex[:8]}"

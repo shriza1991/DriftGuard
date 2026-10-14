@@ -1081,3 +1081,20 @@ Content-Type: application/json
   2. Unfinalized runs are marked `status: "interrupted"`, `termination_reason: "shutdown_cancelled"`.
   3. Business and admin HTTP clients are cleanly closed (`aclose()`).
 ```
+
+## Member 2 review integration corrections
+
+- `/demo/mutation` accepts `evidence_level: "ordinary" | "explicit_hint"`, matching the mock API. Use `explicit_hint` for the fully evidenced combined demonstration.
+- `/runs` with `mode: "healing"` defaults to `model_driven_healing`; use `execution_type: "deterministic"` explicitly for the scripted workflow. Baseline events retain the agreed `normal` event mode and use the baseline execution label.
+- Configure `ORCHESTRATOR_ASSIGNMENT_TOKEN` locally to the same value as the mock API's configured assignment bearer token. This is an existing credential reference (`secops_auth`); the healer never invents a token. No token is supplied by default. Example local frontend origins are allowed by default; override `ORCHESTRATOR_CORS_ORIGINS` with a JSON list as needed.
+- Install a real provider adapter with `pip install -e ".[dev,gemini]"` or `pip install -e ".[dev,openai]"`. Set the existing model-provider/name/key variables. No live provider test was performed during review.
+- After rename/nesting, model arguments become `assignee_id` or `target.id`; the argument schema, required lists and wire mappings change together. Old caller arguments remain immutable and are transformed only for the repaired invocation. The current prototype's agent intent parser requires an explicit `Find <name>` and `ticket <number>` task.
+- Recovery `deadline` means remaining seconds and bounds the whole operation. No implicit global pre-write guarantee is installed. The real mock supplies pre-execution rejection evidence.
+- Events are delivered live only after ordered SQLite persistence. Replay flushes pending durable writes before reading history. Durable replay failure emits an SSE error rather than substituting unpersisted memory data. Read-only SSE disconnects do not cancel a run; waiting HTTP requests shield managed execution.
+- `/patches` reports `available` and real persistent repair history, rather than a leftover stub status. Archived patch definitions remain distinct from active registry entries.
+- An accepted HTTP response is separate from independently verified business effect. Wrong-assignee verification cannot complete the run; unresolved/wrong-intent model assignments perform no write. An uncertain or exhausted recovery stops further agent writes.
+- Session input/output/total counts include diagnosis once. Partial usage remains incomplete; deterministic diagnosis with no model call has zero diagnosis tokens. Compare baseline to the first healing run for adaptation overhead and report the already-patched run separately for reuse.
+
+Apply the review patch only against its recorded base commit, using `git apply --check` first, then run `python -m pytest -q`.
+
+SQLite schema version 2 adds `pre_write_authorizations`; these internal safety records never consume public event sequence numbers. This prevents collisions with `retry_started` and other dashboard events. Existing schema version 1 databases migrate additively; archived event gaps from the old implementation cannot be reconstructed. Use a fresh local demo database for new benchmark evidence while retaining older files for audit.

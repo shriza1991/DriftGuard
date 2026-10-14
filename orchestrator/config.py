@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 
@@ -11,7 +12,8 @@ class OrchestratorSettings(BaseSettings):
     model_api_key: Optional[str] = None
     sqlite_db_path: str = "driftguard.sqlite3"
     log_level: str = "INFO"
-    cors_origins: list[str] = ["*"]
+    cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    assignment_token: Optional[str] = Field(default=None, repr=False)
 
     model_config = SettingsConfigDict(
         env_prefix="ORCHESTRATOR_",

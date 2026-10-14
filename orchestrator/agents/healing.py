@@ -12,6 +12,7 @@ Adheres strictly to Member 2 safety invariants:
 - Truthful usage and event reporting: diagnosis tokens are 0.
 """
 from typing import Dict, Any, Optional, List
+import asyncio
 import json
 import re
 import time
@@ -67,7 +68,7 @@ class HealingAgent:
             "Authorization": "secops_auth",
             "X-DriftGuard-Key": "driftguard_internal",
         }
-        self.execution_guarantees = execution_guarantees or {"pre_execution_rejection": True}
+        self.execution_guarantees = execution_guarantees or {}
         self.audit_store = audit_store
 
         # Initialize recovery controller with dependency injection
@@ -83,6 +84,7 @@ class HealingAgent:
             event_broadcaster=event_broadcaster,
             approved_header_credentials=self.approved_header_credentials,
             execution_guarantees=self.execution_guarantees,
+            credential_resolver=lambda ref: bool(executor.client.credential_resolver(ref)),
             llm_diagnoser=diagnoser,
             audit_store=self.audit_store,
         )
@@ -96,10 +98,14 @@ class HealingAgent:
     def _extract_task_intent(self, task: str) -> Dict[str, Any]:
         """Extracts expected target ticket ID and user name from task description string."""
         ticket_match = re.search(r"ticket\s*(\d+)", task, re.IGNORECASE)
-        target_ticket = int(ticket_match.group(1)) if ticket_match else 81
+        if ticket_match is None:
+            raise ValueError("Task must explicitly identify a ticket")
+        target_ticket = int(ticket_match.group(1))
 
         user_match = re.search(r"find\s+([A-Za-z]+)", task, re.IGNORECASE)
-        target_user_name = user_match.group(1) if user_match else "Maya"
+        if user_match is None:
+            raise ValueError("Prototype task must explicitly say Find <name>")
+        target_user_name = user_match.group(1)
 
         return {
             "ticket_id": target_ticket,
@@ -220,6 +226,9 @@ class HealingAgent:
             HumanMessage(content=task),
         ]
 
+        if self.recovery_controller.llm_diagnoser is None:
+            self.recovery_controller.llm_diagnoser = LLMDiagnoser(model=active_model, approved_header_credentials=self.approved_header_credentials)
+
         # Ensure recovery controller has active diagnoser model if active_model resolved
         if self.recovery_controller.llm_diagnoser is not None and self.recovery_controller.llm_diagnoser.model is None:
             self.recovery_controller.llm_diagnoser.model = active_model
@@ -236,6 +245,8 @@ class HealingAgent:
         termination_reason: Optional[str] = None
         write_idempotency_keys: Dict[str, str] = {}
         had_uncertain_write = False
+        resolved_user_id = None
+        recovery_exhausted = False
 
         # 5. Agent Multi-Turn Loop
         while turns_executed < max_turns:
@@ -247,7 +258,10 @@ class HealingAgent:
             turns_executed += 1
 
             try:
-                ai_response: AIMessage = await bound_model.ainvoke(messages)
+                ai_response: AIMessage = await asyncio.wait_for(bound_model.ainvoke(messages), max(0.0, deadline - time.perf_counter()))
+            except asyncio.TimeoutError:
+                termination_reason = "deadline_exceeded"
+                break
             except Exception as e:
                 termination_reason = "model_invocation_error"
                 run_record["error"] = f"Model call failed on turn {turns_executed}: {e}"
@@ -260,8 +274,12 @@ class HealingAgent:
                 else None
             )
             if usage and isinstance(usage, dict):
-                in_tok = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
-                out_tok = usage.get("output_tokens") or usage.get("completion_tokens") or 0
+                raw_in = usage.get("input_tokens", usage.get("prompt_tokens"))
+                raw_out = usage.get("output_tokens", usage.get("completion_tokens"))
+                complete_usage = isinstance(raw_in, int) and isinstance(raw_out, int)
+                has_token_usage = has_token_usage and complete_usage
+                in_tok = raw_in if isinstance(raw_in, int) else 0
+                out_tok = raw_out if isinstance(raw_out, int) else 0
                 total_input_tokens += in_tok
                 total_output_tokens += out_tok
                 if self.audit_store:
@@ -269,10 +287,10 @@ class HealingAgent:
                         run_id=run_id,
                         call_id=f"turn-{turns_executed}",
                         purpose="agent_turn",
-                        prompt_tokens=in_tok,
-                        completion_tokens=out_tok,
-                        total_tokens=in_tok + out_tok,
-                        is_complete=True,
+                        prompt_tokens=raw_in,
+                        completion_tokens=raw_out,
+                        total_tokens=in_tok + out_tok if complete_usage else None,
+                        is_complete=complete_usage,
                     )
             else:
                 has_token_usage = False
@@ -313,7 +331,7 @@ class HealingAgent:
                 tool_call_id = call.get("id") or f"call-{uuid.uuid4().hex[:8]}"
 
                 # Reject unknown tools without HTTP dispatch
-                active_tool = self.registry.get(tool_name)
+                active_tool = self.registry.get(tool_name) if tool_name in self.registry else None
                 if not active_tool:
                     unknown_err = f"Unknown tool '{tool_name}'. Available tools: {list(self.registry.list_tools())}"
                     event_broadcaster.publish_event(
@@ -344,6 +362,14 @@ class HealingAgent:
                     })
                     continue
 
+                if tool_name == "assign_ticket":
+                    supplied_user = tool_args.get("user_id", tool_args.get("assignee_id", tool_args.get("target", {}).get("id")))
+                    if resolved_user_id is None or str(supplied_user) != str(resolved_user_id) or tool_args.get("ticket_id") != target_ticket:
+                        message = "Assignment does not match independently resolved task intent; resolve the requested user first"
+                        messages.append(ToolMessage(content=json.dumps({"error": message}), tool_call_id=tool_call_id, name=tool_name))
+                        recorded_tool_calls.append({"tool_call_id": tool_call_id, "tool_name": tool_name, "arguments": redact_secrets(tool_args), "status": "intent_rejected"})
+                        continue
+
                 # Stable operation identity & Idempotency-Key on mutation writes
                 write_idemp_key: Optional[str] = None
                 if active_tool.method.upper() in ["POST", "PUT", "PATCH", "DELETE"]:
@@ -371,11 +397,11 @@ class HealingAgent:
                     tool_call_id=tool_call_id,
                     idempotency_key=write_idemp_key,
                 )
-                exec_result = await executor.execute(
+                exec_result = await asyncio.wait_for(executor.execute(
                     tool_name_or_def=tool_name,
                     arguments=tool_args,
                     context=ctx,
-                )
+                ), timeout=max(0.0, deadline - time.perf_counter()))
 
                 if self.audit_store:
                     await self.audit_store.record_tool_execution(
@@ -390,13 +416,16 @@ class HealingAgent:
                         status="success" if exec_result.is_success else "failed",
                         result=exec_result.outcome or exec_result.result,
                         failure=exec_result.failure.model_dump() if exec_result.failure else None,
-                        timing={"duration_ms": exec_result.duration_ms} if exec_result else None,
+                        timing={"duration_ms": exec_result.timing.duration_ms} if exec_result else None,
                         operation_identity=exec_result.operation_identity.key if exec_result.operation_identity else None,
                     )
 
+                recovery_res = None
                 if exec_result.is_success:
                     # Normal success on active tool
                     success_payload = exec_result.outcome or exec_result.result or {"status": "success"}
+                    if tool_name == "find_user" and str(tool_args.get("name", "")).casefold() == target_user_name.casefold():
+                        resolved_user_id = success_payload.get("user_id")
                     messages.append(ToolMessage(
                         content=json.dumps(redact_secrets(success_payload)),
                         tool_call_id=tool_call_id,
@@ -453,6 +482,16 @@ class HealingAgent:
                             mode="healing",
                         )
 
+                    if recovery_res is not None and recovery_res.audit_incomplete:
+                        run_record["audit_status"] = "incomplete"
+
+                    if recovery_res is not None and (recovery_res.uncertain_write or (recovery_res.execution_result and recovery_res.execution_result.failure and recovery_res.execution_result.failure.uncertain_write)):
+                        had_uncertain_write = True
+
+                    if recovery_res is not None and recovery_res.diagnosis_source == "llm_assisted":
+                        if not recovery_res.diagnosis_token_details or not recovery_res.diagnosis_token_details.get("is_complete", True):
+                            has_token_usage = False
+
                     if recovery_res is not None and recovery_res.diagnosis_tokens > 0:
                         total_diagnosis_tokens += recovery_res.diagnosis_tokens
                         if recovery_res.diagnosis_token_details:
@@ -490,23 +529,6 @@ class HealingAgent:
                             "committed_version": recovery_res.committed_version,
                         })
 
-                        if self.audit_store and recovery_res.execution_result:
-                            await self.audit_store.record_tool_execution(
-                                run_id=run_id,
-                                tool_call_id=tool_call_id,
-                                tool_name=tool_name,
-                                tool_version=recovery_res.committed_version or active_tool.version,
-                                fingerprint=recovery_res.committed_fingerprint or "",
-                                attempt_number=2,
-                                is_repaired=True,
-                                arguments=tool_args,
-                                status="success",
-                                result=recovery_res.execution_result.outcome or recovery_res.execution_result.result,
-                                failure=None,
-                                timing={"duration_ms": recovery_res.execution_result.duration_ms} if recovery_res.execution_result else None,
-                                operation_identity=exec_result.operation_identity.key if exec_result.operation_identity else None,
-                            )
-
                         # Refresh model bindings from committed registry definitions before the next model invocation
                         current_active_tools = {t.name: t for t in self.registry.list_tools()}
                         bound_model = active_model.bind_tools(get_langchain_tool_specs(current_active_tools))
@@ -533,25 +555,37 @@ class HealingAgent:
                             "error": redact_secrets(err_dict),
                         })
 
+                if had_uncertain_write or (recovery_res is not None and not recovery_res.recovered):
+                    recovery_exhausted = True
+                    termination_reason = "uncertain_write" if had_uncertain_write else "recovery_exhausted"
+                    break
+
+            if recovery_exhausted or termination_reason in ("deadline_exceeded", "max_tool_calls_exceeded"):
+                break
+
         if not termination_reason:
             termination_reason = "max_turns_exceeded"
 
         # 6. Independent Downstream State Verification
         verif_ctx = ExecutionContext(run_id=run_id)
-        verify_result = await executor.execute(
-            tool_name_or_def="get_ticket",
-            arguments={"ticket_id": target_ticket},
-            context=verif_ctx,
-        )
+        try:
+            verify_result = await asyncio.wait_for(executor.execute(
+                tool_name_or_def="get_ticket",
+                arguments={"ticket_id": target_ticket},
+                context=verif_ctx,
+            ), timeout=max(0.0, deadline - time.perf_counter()))
+        except asyncio.TimeoutError:
+            verify_result = None
+            termination_reason = "deadline_exceeded"
 
         verified_assignee = None
         verified_ticket_id = None
         downstream_verified = False
 
-        if verify_result.is_success and verify_result.outcome:
+        if verify_result is not None and verify_result.is_success and verify_result.outcome:
             verified_assignee = str(verify_result.outcome.get("assignee_id") or "")
             verified_ticket_id = verify_result.outcome.get("ticket_id")
-            downstream_verified = bool(verified_assignee and verified_assignee != "None")
+            downstream_verified = (resolved_user_id is not None and str(verified_assignee) == str(resolved_user_id) and str(verified_ticket_id) == str(target_ticket))
 
         duration_ms = round((time.perf_counter() - start_perf) * 1000, 2)
 
@@ -566,8 +600,16 @@ class HealingAgent:
                 "diagnosis_token_details": diagnosis_tokens_details if total_diagnosis_tokens > 0 else None,
             }
 
+        if not has_token_usage:
+            token_usage_dict = {"prompt_tokens": total_input_tokens + diagnosis_tokens_details["input_tokens"],
+                "completion_tokens": total_output_tokens + diagnosis_tokens_details["output_tokens"],
+                "total_tokens": total_input_tokens + total_output_tokens + total_diagnosis_tokens,
+                "diagnosis_tokens": total_diagnosis_tokens, "is_complete": False, "status": "incomplete_subtotal"}
+        else:
+            token_usage_dict["is_complete"] = True
+
         # Determine Final Workflow Success
-        is_successful_run = downstream_verified and not had_uncertain_write
+        is_successful_run = downstream_verified and not had_uncertain_write and not recovery_exhausted and termination_reason == "model_completed"
 
         final_outcome: Dict[str, Any] = {
             "ticket_id": target_ticket,

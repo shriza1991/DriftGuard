@@ -223,7 +223,7 @@ async def test_baseline_rejects_unknown_and_invalid_tool_calls_without_http():
     assert len(assign_calls) == 0  # Zero HTTP assignment calls made
     assert len(result["tool_calls"]) == 2
     assert result["tool_calls"][0]["status"] == "unknown_tool"
-    assert result["tool_calls"][1]["status"] == "validation_error"
+    assert result["tool_calls"][1]["status"] == "intent_rejected"
 
 
 @pytest.mark.asyncio
@@ -327,7 +327,7 @@ async def test_repeated_write_intent_preserves_idempotency_identity():
     )
     call3 = AIMessage(content="Done.", tool_calls=[])
 
-    fake_model = ScriptedChatModel(responses=[call1, call2, call3])
+    fake_model = ScriptedChatModel(responses=[AIMessage(content="", tool_calls=[{"name":"find_user","args":{"name":"Maya"},"id":"resolve"}]), call1, call2, call3])
     agent = BaselineAgent(client=client, model=fake_model)
 
     await agent.execute_workflow(run_id="test-idempotency-key")
@@ -354,14 +354,14 @@ async def test_uncertain_writes_not_blindly_retried():
     )
     call2 = AIMessage(content="Assign failed.", tool_calls=[])
 
-    fake_model = ScriptedChatModel(responses=[call1, call2])
+    fake_model = ScriptedChatModel(responses=[AIMessage(content="", tool_calls=[{"name":"find_user","args":{"name":"Maya"},"id":"resolve"}]), call1, call2])
     agent = BaselineAgent(client=client, model=fake_model)
 
     result = await agent.execute_workflow(run_id="test-uncertain-write")
 
     assert result["success"] is False
     assert len(assign_calls) == 1
-    assign_rec = result["tool_calls"][0]
+    assign_rec = next(c for c in result["tool_calls"] if c["tool_name"] == "assign_ticket")
     assert assign_rec["status"] == "http_error"
     assert assign_rec["error"]["status_code"] == 500
 

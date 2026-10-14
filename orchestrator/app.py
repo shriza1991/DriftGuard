@@ -23,7 +23,7 @@ async def lifespan(app: FastAPI):
     if not hasattr(app.state, "registry") or app.state.registry is None:
         app.state.registry = VersionedToolRegistry.create_default()
     if not hasattr(app.state, "mock_client") or app.state.mock_client is None:
-        app.state.mock_client = MockBusinessApiClient(base_url=settings.mock_api_url)
+        app.state.mock_client = MockBusinessApiClient(base_url=settings.mock_api_url, credential_resolver=lambda ref: settings.assignment_token if ref == "secops_auth" else None)
     if not hasattr(app.state, "admin_client") or app.state.admin_client is None:
         app.state.admin_client = MockAdminApiClient(base_url=settings.mock_api_url)
     if not hasattr(app.state, "audit_store") or app.state.audit_store is None:
@@ -41,7 +41,8 @@ async def lifespan(app: FastAPI):
     yield
 
     # Managed shutdown sequence: cancel and await background tasks within finite budget
-    await app_task_manager.cancel_and_wait_all(timeout=5.0)
+    await app.state.task_manager.cancel_and_wait_all(timeout=5.0)
+    await event_broadcaster.flush()
 
     # Safely close clients
     if hasattr(app.state, "mock_client") and app.state.mock_client:
@@ -59,7 +60,7 @@ app = FastAPI(
 
 # Initialize registry, client, and audit store on app state for direct ASGI test clients
 app.state.registry = VersionedToolRegistry.create_default()
-app.state.mock_client = MockBusinessApiClient(base_url=settings.mock_api_url)
+app.state.mock_client = MockBusinessApiClient(base_url=settings.mock_api_url, credential_resolver=lambda ref: settings.assignment_token if ref == "secops_auth" else None)
 app.state.admin_client = MockAdminApiClient(base_url=settings.mock_api_url)
 app.state.audit_store = SQLiteAuditStore(db_path=settings.sqlite_db_path)
 app.state.admission_gate = admission_gate

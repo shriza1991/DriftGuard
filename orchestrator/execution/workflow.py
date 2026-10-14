@@ -255,7 +255,13 @@ class WorkflowExecutionManager:
                 if candidate_snapshot and candidate_snapshot.name == "assign_ticket"
                 else active_registry.get("assign_ticket")
             )
-            assign_args = {"ticket_id": target_ticket, "user_id": maya_id}
+            props = assign_tool.argument_schema.properties
+            if "target" in props:
+                leaf_type = props["target"]["properties"]["id"].get("type")
+                assign_args = {"ticket_id": target_ticket, "target": {"id": int(maya_id) if leaf_type == "integer" else maya_id}}
+            else:
+                field = "assignee_id" if "assignee_id" in props else "user_id"
+                assign_args = {"ticket_id": target_ticket, field: int(maya_id) if props[field].get("type") == "integer" else maya_id}
             assign_idemp_key = f"dg-idemp-assign-{target_ticket}-{uuid.uuid4().hex[:8]}"
 
             event_broadcaster.publish_event(
@@ -389,7 +395,7 @@ class WorkflowExecutionManager:
                             executor=executor,
                             event_broadcaster=event_broadcaster,
                             approved_header_credentials={"Authorization": "secops_auth"},
-                            execution_guarantees={"pre_execution_rejection": True},
+                            execution_guarantees={},
                             audit_store=self.audit_store,
                         )
                         recovery_res = await rec_ctrl.recover_failure(

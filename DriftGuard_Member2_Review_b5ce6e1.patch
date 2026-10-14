@@ -1,0 +1,2324 @@
+diff --git a/docs/DECISIONS.md b/docs/DECISIONS.md
+index e670721..ab51788 100644
+--- a/docs/DECISIONS.md
++++ b/docs/DECISIONS.md
+@@ -230,3 +230,11 @@
+ 
+ 
+ 
++
++## ADR 034 Member 2 review corrections
++
++Contract transformations now change model-visible argument paths and required fields alongside HTTP mappings, with a shared restricted transformation helper and independent evidence authorization. Natural-language correspondence is checked directionally; mere co-occurrence of field names and a rename keyword is insufficient. Captured original arguments remain immutable.
++
++## ADR 035 Durable events and bounded truthful execution
++
++Live events are published after serialized persistent writes; failed writes mark audit incomplete and prevent durable replay claims. Model/recovery deadlines include verification. Admission and waiting request lifetimes do not own the managed worker. Business acceptance, verified effect and registry commit remain distinct; no fabricated defaults or missing usage counts authorize success.
+diff --git a/docs/INTEGRATION.md b/docs/INTEGRATION.md
+index e635e08..67962bc 100644
+--- a/docs/INTEGRATION.md
++++ b/docs/INTEGRATION.md
+@@ -1081,3 +1081,20 @@ Content-Type: application/json
+   2. Unfinalized runs are marked `status: "interrupted"`, `termination_reason: "shutdown_cancelled"`.
+   3. Business and admin HTTP clients are cleanly closed (`aclose()`).
+ ```
++
++## Member 2 review integration corrections
++
++- `/demo/mutation` accepts `evidence_level: "ordinary" | "explicit_hint"`, matching the mock API. Use `explicit_hint` for the fully evidenced combined demonstration.
++- `/runs` with `mode: "healing"` defaults to `model_driven_healing`; use `execution_type: "deterministic"` explicitly for the scripted workflow. Baseline events retain the agreed `normal` event mode and use the baseline execution label.
++- Configure `ORCHESTRATOR_ASSIGNMENT_TOKEN` locally to the same value as the mock API's configured assignment bearer token. This is an existing credential reference (`secops_auth`); the healer never invents a token. No token is supplied by default. Example local frontend origins are allowed by default; override `ORCHESTRATOR_CORS_ORIGINS` with a JSON list as needed.
++- Install a real provider adapter with `pip install -e ".[dev,gemini]"` or `pip install -e ".[dev,openai]"`. Set the existing model-provider/name/key variables. No live provider test was performed during review.
++- After rename/nesting, model arguments become `assignee_id` or `target.id`; the argument schema, required lists and wire mappings change together. Old caller arguments remain immutable and are transformed only for the repaired invocation. The current prototype's agent intent parser requires an explicit `Find <name>` and `ticket <number>` task.
++- Recovery `deadline` means remaining seconds and bounds the whole operation. No implicit global pre-write guarantee is installed. The real mock supplies pre-execution rejection evidence.
++- Events are delivered live only after ordered SQLite persistence. Replay flushes pending durable writes before reading history. Durable replay failure emits an SSE error rather than substituting unpersisted memory data. Read-only SSE disconnects do not cancel a run; waiting HTTP requests shield managed execution.
++- `/patches` reports `available` and real persistent repair history, rather than a leftover stub status. Archived patch definitions remain distinct from active registry entries.
++- An accepted HTTP response is separate from independently verified business effect. Wrong-assignee verification cannot complete the run; unresolved/wrong-intent model assignments perform no write. An uncertain or exhausted recovery stops further agent writes.
++- Session input/output/total counts include diagnosis once. Partial usage remains incomplete; deterministic diagnosis with no model call has zero diagnosis tokens. Compare baseline to the first healing run for adaptation overhead and report the already-patched run separately for reuse.
++
++Apply the review patch only against its recorded base commit, using `git apply --check` first, then run `python -m pytest -q`.
++
++SQLite schema version 2 adds `pre_write_authorizations`; these internal safety records never consume public event sequence numbers. This prevents collisions with `retry_started` and other dashboard events. Existing schema version 1 databases migrate additively; archived event gaps from the old implementation cannot be reconstructed. Use a fresh local demo database for new benchmark evidence while retaining older files for audit.
+diff --git a/docs/member2_review.md b/docs/member2_review.md
+new file mode 100644
+index 0000000..a90e539
+--- /dev/null
++++ b/docs/member2_review.md
+@@ -0,0 +1,40 @@
++# Member 2 repository review
++
++Base: `b5ce6e13309c4a2004f873c6eefb59376a64ac12` on `main`.
++
++## Verified findings and corrections
++
++| Tasks | Finding | Correction |
++| --- | --- | --- |
++| 1 and 3 | Runtime credential resolver always returned None; credential placeholders in custom headers could be sent literally. | Local configured assignment credential reference; approved placeholder substitution. |
++| 2 | Registry staging did not validate full JSON Schema; constraints could be dropped by model parsing. | Schema validation and preservation of extra JSON Schema constraints. |
++| 3 and 4 | Agent tasks silently defaulted to Maya/ticket 81; unresolved or incorrect assignment intent could write. | Explicit supported task syntax and pre-write matching against directory evidence. |
++| 4 | Audited baseline used undefined `turns_executed`; both model agents read nonexistent result duration fields. | Correct turn identifier and TimingInfo access. |
++| 5 and 7 | Healing installed an implicit global pre-execution guarantee; language evidence used keyword co-occurrence. | No implicit guarantee; directional correspondence validation against original evidence. |
++| 6 and 7 | Rename/nesting changed only HTTP mappings. | Coherent model-visible schema paths, required fields, argument transformation and mappings. |
++| 8 | Final healing success accepted any assigned user; complete recovery/model calls were not deadline bounded. | Verify requested ticket and resolved assignee; bounded model, dispatch, verifier and recovery stages. |
++| 8 | Recovery exhaustion identity omitted run/write identity; failed recovery could leave the model trying again. | Scoped operation identities, one-attempt tracking and terminal recovery behavior. |
++| 9 | Lazy-created models did not initialize fallback diagnosis; usage metadata could be fabricated as zero. | Initialize bounded fallback; strict output models and incomplete-usage handling. |
++| 10 | Token metadata was redacted; failed repair dispatches and early refusal outcomes were missing; completion could clear audit-incomplete state. | Preserve usage metadata, persist outcomes and maintain incomplete state. |
++| 10 and 11 | Event writes were untracked and happened after live publication; internal authorization events collided with public sequences. | Serialized durable publication, flush/replay synchronization and a separate authorization table. |
++| 11 | Mutation evidence levels did not match Member 1; default healing selected deterministic execution; patch endpoint remained a stub. | Actual evidence enum, genuine healing default and persistent patch history response. |
++| 11 | Failed mutation could return the gate to idle; cancelled waiting HTTP requests could cancel managed runs. | Quarantine uncertain admin state; shield managed runs and release admission safely. |
++| Setup | Editable installation failed on multiple top-level package discovery. | Explicit backend package discovery and provider installation extras. |
++
++## Validation
++
++Run `python -m pytest -q`. The review adds 14 regression cases, including the actual Member 1 ASGI API for all five positive mutation scenarios and subsequent repaired-contract reuse. It exercises a public combined run, SQLite history and SSE reconnect with a scripted model. Fixtures were updated where their old assertions contradicted the corrected contract or trusted-intent requirements; safety assertions were retained or strengthened.
++
++No live Gemini/OpenAI call was made. These checks do not establish live-provider latency, adaptation-rate benchmarks or frontend visual quality. Member 1 owns benchmark aggregation and Member 3 owns dashboard implementation.
++
++## Applying
++
++Confirm your checkout is the base above and preserve local work. From the repository root:
++
++```bash
++git apply --check /path/to/DriftGuard_Member2_Review_b5ce6e1.patch
++git apply /path/to/DriftGuard_Member2_Review_b5ce6e1.patch
++python -m pytest -q
++```
++
++For a real-provider rehearsal install the selected adapter extra and configure its existing provider/name/key settings plus the approved assignment token. The current agent task grammar requires explicit `Find <name>` and `ticket <number>`; response nesting recovery remains stretch scope. Registry state remains in-memory after restart; persistent audit is not automatic replay authorization.
+diff --git a/docs/member_2.md b/docs/member_2.md
+index be628da..5d0848b 100644
+--- a/docs/member_2.md
++++ b/docs/member_2.md
+@@ -316,3 +316,19 @@
+ 6. Mutating writes are strictly blocked if pre-write audit fails.
+ 7. Post-write audit failure flags incomplete audit without retrying writes.
+ 8. Demo reset preserves persistent SQLite history while resetting runtime state.
++
++## Repository review patch against b5ce6e1
++
++The code review identified failures hidden by synthetic transport/model fixtures:
++- Real mock mutation controls support `ordinary` and `explicit_hint`, not `minimal`/`rich`.
++- Audited model runs used undefined baseline turn identifiers and nonexistent execution duration attributes.
++- Healing final verification accepted any assignee instead of the intended user.
++- Model calls and the complete recovery path were not covered by the declared deadline.
++- Rename/nesting previews changed the HTTP body while leaving model-visible argument names stale.
++- SSE advertised events before durable persistence and could replay a sequence with gaps.
++- Default healing implicitly trusted every rejection, omitted live credential resolution and did not initialize LLM fallback when the model was created lazily.
++- Operation identity omitted the run and logical write identity; distinct operations could share exhaustion tracking.
++
++The patch corrects these paths and adds `tests/healing/test_member2_review.py`, including real Member 1 ASGI API recovery for rename, type, nesting, header and combined drift, committed contract reuse, wrong-intent refusal, audited model orchestration, deadline bounds and durable public SSE replay. Existing tests now assert repaired model-visible contracts and establish directory evidence before agent writes. The test fake used for model rebinding shares its invocation state instead of replaying old turns.
++
++No Member 1, Member 3 or submission implementation is changed. Provider calls remain unverified without credentials; scripted model tests are not live model evidence.
+diff --git a/orchestrator/agents/baseline.py b/orchestrator/agents/baseline.py
+index f9e8d48..bf89dca 100644
+--- a/orchestrator/agents/baseline.py
++++ b/orchestrator/agents/baseline.py
+@@ -68,10 +68,14 @@ class BaselineAgent:
+     def _extract_task_intent(self, task: str) -> Dict[str, Any]:
+         """Extracts expected target ticket ID and user name from task description string."""
+         ticket_match = re.search(r"ticket\s*(\d+)", task, re.IGNORECASE)
+-        target_ticket = int(ticket_match.group(1)) if ticket_match else 81
++        if ticket_match is None:
++            raise ValueError("Task must explicitly identify a ticket")
++        target_ticket = int(ticket_match.group(1))
+ 
+         user_match = re.search(r"find\s+([A-Za-z]+)", task, re.IGNORECASE)
+-        target_user_name = user_match.group(1) if user_match else "Maya"
++        if user_match is None:
++            raise ValueError("Prototype task must explicitly say Find <name>")
++        target_user_name = user_match.group(1)
+ 
+         return {
+             "ticket_id": target_ticket,
+@@ -225,26 +229,30 @@ class BaselineAgent:
+                 else None
+             )
+             if usage and isinstance(usage, dict):
+-                in_tok = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
+-                out_tok = usage.get("output_tokens") or usage.get("completion_tokens") or 0
++                raw_in = usage.get("input_tokens", usage.get("prompt_tokens"))
++                raw_out = usage.get("output_tokens", usage.get("completion_tokens"))
++                complete_usage = isinstance(raw_in, int) and isinstance(raw_out, int)
++                has_token_usage = has_token_usage and complete_usage
++                in_tok = raw_in if isinstance(raw_in, int) else 0
++                out_tok = raw_out if isinstance(raw_out, int) else 0
+                 total_input_tokens += in_tok
+                 total_output_tokens += out_tok
+                 if self.audit_store:
+                     await self.audit_store.record_model_usage(
+                         run_id=run_id,
+-                        call_id=f"turn-{turns_executed}",
++                        call_id=f"turn-{turn}",
+                         purpose="agent_turn",
+-                        prompt_tokens=in_tok,
+-                        completion_tokens=out_tok,
+-                        total_tokens=in_tok + out_tok,
+-                        is_complete=True,
++                        prompt_tokens=raw_in,
++                        completion_tokens=raw_out,
++                        total_tokens=in_tok + out_tok if complete_usage else None,
++                        is_complete=complete_usage,
+                     )
+             else:
+                 has_token_usage = False
+                 if self.audit_store:
+                     await self.audit_store.record_model_usage(
+                         run_id=run_id,
+-                        call_id=f"turn-{turns_executed}",
++                        call_id=f"turn-{turn}",
+                         purpose="agent_turn",
+                         prompt_tokens=None,
+                         completion_tokens=None,
+@@ -311,6 +319,14 @@ class BaselineAgent:
+                 # Retrieve frozen v1 snapshot
+                 frozen_tool = self.catalogue[tool_name]
+ 
++                if tool_name == "assign_ticket":
++                    supplied_user = tool_args.get("user_id", tool_args.get("assignee_id", tool_args.get("target", {}).get("id")))
++                    if resolved_user_id is None or str(supplied_user) != str(resolved_user_id) or tool_args.get("ticket_id") != target_ticket:
++                        message = "Assignment does not match independently resolved task intent; resolve the requested user first"
++                        messages.append(ToolMessage(content=json.dumps({"error": message}), tool_call_id=tool_call_id, name=tool_name))
++                        recorded_tool_calls.append({"tool_call_id": tool_call_id, "tool_name": tool_name, "arguments": redact_secrets(tool_args), "status": "intent_rejected"})
++                        continue
++
+                 # Stable operation identity & Idempotency-Key on mutation writes
+                 write_idemp_key: Optional[str] = None
+                 if frozen_tool.method.upper() in ["POST", "PUT", "PATCH", "DELETE"]:
+@@ -338,12 +354,12 @@ class BaselineAgent:
+                     tool_call_id=tool_call_id,
+                     idempotency_key=write_idemp_key,
+                 )
+-                exec_result = await executor.execute(
++                exec_result = await asyncio.wait_for(executor.execute(
+                     tool_name_or_def=tool_name,
+                     arguments=tool_args,
+                     context=ctx,
+                     candidate_snapshot=frozen_tool,
+-                )
++                ), timeout=max(0.0, deadline - time.perf_counter()))
+ 
+                 if self.audit_store:
+                     await self.audit_store.record_tool_execution(
+@@ -358,7 +374,7 @@ class BaselineAgent:
+                         status="success" if exec_result.is_success else "failed",
+                         result=exec_result.outcome or exec_result.result,
+                         failure=exec_result.failure.model_dump() if exec_result.failure else None,
+-                        timing={"duration_ms": exec_result.duration_ms} if exec_result else None,
++                        timing={"duration_ms": exec_result.timing.duration_ms} if exec_result else None,
+                         operation_identity=exec_result.operation_identity.key if exec_result.operation_identity else None,
+                     )
+ 
+@@ -406,9 +422,11 @@ class BaselineAgent:
+                         "error": redact_secrets(err_dict),
+                         "uncertain_write": uncertain,
+                     })
++                    if had_uncertain_write:
++                        break
+                 else:
+                     outcome_data = exec_result.outcome or {}
+-                    if tool_name == "find_user" and "user_id" in outcome_data:
++                    if tool_name == "find_user" and "user_id" in outcome_data and str(tool_args.get("name", "")).casefold() == target_user_name.casefold():
+                         resolved_user_id = str(outcome_data["user_id"])
+ 
+                     messages.append(ToolMessage(
+@@ -424,6 +442,10 @@ class BaselineAgent:
+                         "outcome": redact_secrets(outcome_data),
+                     })
+ 
++            if had_uncertain_write:
++                termination_reason = "uncertain_write"
++                break
++
+             if termination_reason in ["deadline_exceeded", "max_tool_calls_exceeded"]:
+                 break
+ 
+@@ -444,14 +466,18 @@ class BaselineAgent:
+             run_id=run_id,
+             tool_call_id=f"call-verify-{uuid.uuid4().hex[:6]}",
+         )
+-        read_result = await executor.execute(
+-            "get_ticket",
+-            {"ticket_id": target_ticket},
+-            context=verify_ctx,
+-            candidate_snapshot=get_ticket_tool,
+-        )
+-
+-        if read_result.is_success and read_result.outcome:
++        try:
++            read_result = await asyncio.wait_for(executor.execute(
++                "get_ticket",
++                {"ticket_id": target_ticket},
++                context=verify_ctx,
++                candidate_snapshot=get_ticket_tool,
++            ), timeout=max(0.0, deadline - time.perf_counter()))
++        except asyncio.TimeoutError:
++            read_result = None
++            termination_reason = "deadline_exceeded"
++
++        if read_result is not None and read_result.is_success and read_result.outcome:
+             verified_assignee_id = read_result.outcome.get("assignee_id")
+             verified_ticket_id = read_result.outcome.get("ticket_id")
+             ticket_status = read_result.outcome.get("status")
+@@ -472,7 +498,7 @@ class BaselineAgent:
+         else:
+             verification_error = (
+                 read_result.failure.message
+-                if read_result.failure
++                if read_result is not None and read_result.failure
+                 else "Independent read verification call to get_ticket failed."
+             )
+ 
+diff --git a/orchestrator/agents/healing.py b/orchestrator/agents/healing.py
+index 6eb99f3..84d36ff 100644
+--- a/orchestrator/agents/healing.py
++++ b/orchestrator/agents/healing.py
+@@ -12,6 +12,7 @@ Adheres strictly to Member 2 safety invariants:
+ - Truthful usage and event reporting: diagnosis tokens are 0.
+ """
+ from typing import Dict, Any, Optional, List
++import asyncio
+ import json
+ import re
+ import time
+@@ -67,7 +68,7 @@ class HealingAgent:
+             "Authorization": "secops_auth",
+             "X-DriftGuard-Key": "driftguard_internal",
+         }
+-        self.execution_guarantees = execution_guarantees or {"pre_execution_rejection": True}
++        self.execution_guarantees = execution_guarantees or {}
+         self.audit_store = audit_store
+ 
+         # Initialize recovery controller with dependency injection
+@@ -83,6 +84,7 @@ class HealingAgent:
+             event_broadcaster=event_broadcaster,
+             approved_header_credentials=self.approved_header_credentials,
+             execution_guarantees=self.execution_guarantees,
++            credential_resolver=lambda ref: bool(executor.client.credential_resolver(ref)),
+             llm_diagnoser=diagnoser,
+             audit_store=self.audit_store,
+         )
+@@ -96,10 +98,14 @@ class HealingAgent:
+     def _extract_task_intent(self, task: str) -> Dict[str, Any]:
+         """Extracts expected target ticket ID and user name from task description string."""
+         ticket_match = re.search(r"ticket\s*(\d+)", task, re.IGNORECASE)
+-        target_ticket = int(ticket_match.group(1)) if ticket_match else 81
++        if ticket_match is None:
++            raise ValueError("Task must explicitly identify a ticket")
++        target_ticket = int(ticket_match.group(1))
+ 
+         user_match = re.search(r"find\s+([A-Za-z]+)", task, re.IGNORECASE)
+-        target_user_name = user_match.group(1) if user_match else "Maya"
++        if user_match is None:
++            raise ValueError("Prototype task must explicitly say Find <name>")
++        target_user_name = user_match.group(1)
+ 
+         return {
+             "ticket_id": target_ticket,
+@@ -220,6 +226,9 @@ class HealingAgent:
+             HumanMessage(content=task),
+         ]
+ 
++        if self.recovery_controller.llm_diagnoser is None:
++            self.recovery_controller.llm_diagnoser = LLMDiagnoser(model=active_model, approved_header_credentials=self.approved_header_credentials)
++
+         # Ensure recovery controller has active diagnoser model if active_model resolved
+         if self.recovery_controller.llm_diagnoser is not None and self.recovery_controller.llm_diagnoser.model is None:
+             self.recovery_controller.llm_diagnoser.model = active_model
+@@ -236,6 +245,8 @@ class HealingAgent:
+         termination_reason: Optional[str] = None
+         write_idempotency_keys: Dict[str, str] = {}
+         had_uncertain_write = False
++        resolved_user_id = None
++        recovery_exhausted = False
+ 
+         # 5. Agent Multi-Turn Loop
+         while turns_executed < max_turns:
+@@ -247,7 +258,10 @@ class HealingAgent:
+             turns_executed += 1
+ 
+             try:
+-                ai_response: AIMessage = await bound_model.ainvoke(messages)
++                ai_response: AIMessage = await asyncio.wait_for(bound_model.ainvoke(messages), max(0.0, deadline - time.perf_counter()))
++            except asyncio.TimeoutError:
++                termination_reason = "deadline_exceeded"
++                break
+             except Exception as e:
+                 termination_reason = "model_invocation_error"
+                 run_record["error"] = f"Model call failed on turn {turns_executed}: {e}"
+@@ -260,8 +274,12 @@ class HealingAgent:
+                 else None
+             )
+             if usage and isinstance(usage, dict):
+-                in_tok = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
+-                out_tok = usage.get("output_tokens") or usage.get("completion_tokens") or 0
++                raw_in = usage.get("input_tokens", usage.get("prompt_tokens"))
++                raw_out = usage.get("output_tokens", usage.get("completion_tokens"))
++                complete_usage = isinstance(raw_in, int) and isinstance(raw_out, int)
++                has_token_usage = has_token_usage and complete_usage
++                in_tok = raw_in if isinstance(raw_in, int) else 0
++                out_tok = raw_out if isinstance(raw_out, int) else 0
+                 total_input_tokens += in_tok
+                 total_output_tokens += out_tok
+                 if self.audit_store:
+@@ -269,10 +287,10 @@ class HealingAgent:
+                         run_id=run_id,
+                         call_id=f"turn-{turns_executed}",
+                         purpose="agent_turn",
+-                        prompt_tokens=in_tok,
+-                        completion_tokens=out_tok,
+-                        total_tokens=in_tok + out_tok,
+-                        is_complete=True,
++                        prompt_tokens=raw_in,
++                        completion_tokens=raw_out,
++                        total_tokens=in_tok + out_tok if complete_usage else None,
++                        is_complete=complete_usage,
+                     )
+             else:
+                 has_token_usage = False
+@@ -313,7 +331,7 @@ class HealingAgent:
+                 tool_call_id = call.get("id") or f"call-{uuid.uuid4().hex[:8]}"
+ 
+                 # Reject unknown tools without HTTP dispatch
+-                active_tool = self.registry.get(tool_name)
++                active_tool = self.registry.get(tool_name) if tool_name in self.registry else None
+                 if not active_tool:
+                     unknown_err = f"Unknown tool '{tool_name}'. Available tools: {list(self.registry.list_tools())}"
+                     event_broadcaster.publish_event(
+@@ -344,6 +362,14 @@ class HealingAgent:
+                     })
+                     continue
+ 
++                if tool_name == "assign_ticket":
++                    supplied_user = tool_args.get("user_id", tool_args.get("assignee_id", tool_args.get("target", {}).get("id")))
++                    if resolved_user_id is None or str(supplied_user) != str(resolved_user_id) or tool_args.get("ticket_id") != target_ticket:
++                        message = "Assignment does not match independently resolved task intent; resolve the requested user first"
++                        messages.append(ToolMessage(content=json.dumps({"error": message}), tool_call_id=tool_call_id, name=tool_name))
++                        recorded_tool_calls.append({"tool_call_id": tool_call_id, "tool_name": tool_name, "arguments": redact_secrets(tool_args), "status": "intent_rejected"})
++                        continue
++
+                 # Stable operation identity & Idempotency-Key on mutation writes
+                 write_idemp_key: Optional[str] = None
+                 if active_tool.method.upper() in ["POST", "PUT", "PATCH", "DELETE"]:
+@@ -371,11 +397,11 @@ class HealingAgent:
+                     tool_call_id=tool_call_id,
+                     idempotency_key=write_idemp_key,
+                 )
+-                exec_result = await executor.execute(
++                exec_result = await asyncio.wait_for(executor.execute(
+                     tool_name_or_def=tool_name,
+                     arguments=tool_args,
+                     context=ctx,
+-                )
++                ), timeout=max(0.0, deadline - time.perf_counter()))
+ 
+                 if self.audit_store:
+                     await self.audit_store.record_tool_execution(
+@@ -390,13 +416,16 @@ class HealingAgent:
+                         status="success" if exec_result.is_success else "failed",
+                         result=exec_result.outcome or exec_result.result,
+                         failure=exec_result.failure.model_dump() if exec_result.failure else None,
+-                        timing={"duration_ms": exec_result.duration_ms} if exec_result else None,
++                        timing={"duration_ms": exec_result.timing.duration_ms} if exec_result else None,
+                         operation_identity=exec_result.operation_identity.key if exec_result.operation_identity else None,
+                     )
+ 
++                recovery_res = None
+                 if exec_result.is_success:
+                     # Normal success on active tool
+                     success_payload = exec_result.outcome or exec_result.result or {"status": "success"}
++                    if tool_name == "find_user" and str(tool_args.get("name", "")).casefold() == target_user_name.casefold():
++                        resolved_user_id = success_payload.get("user_id")
+                     messages.append(ToolMessage(
+                         content=json.dumps(redact_secrets(success_payload)),
+                         tool_call_id=tool_call_id,
+@@ -453,6 +482,16 @@ class HealingAgent:
+                             mode="healing",
+                         )
+ 
++                    if recovery_res is not None and recovery_res.audit_incomplete:
++                        run_record["audit_status"] = "incomplete"
++
++                    if recovery_res is not None and (recovery_res.uncertain_write or (recovery_res.execution_result and recovery_res.execution_result.failure and recovery_res.execution_result.failure.uncertain_write)):
++                        had_uncertain_write = True
++
++                    if recovery_res is not None and recovery_res.diagnosis_source == "llm_assisted":
++                        if not recovery_res.diagnosis_token_details or not recovery_res.diagnosis_token_details.get("is_complete", True):
++                            has_token_usage = False
++
+                     if recovery_res is not None and recovery_res.diagnosis_tokens > 0:
+                         total_diagnosis_tokens += recovery_res.diagnosis_tokens
+                         if recovery_res.diagnosis_token_details:
+@@ -490,23 +529,6 @@ class HealingAgent:
+                             "committed_version": recovery_res.committed_version,
+                         })
+ 
+-                        if self.audit_store and recovery_res.execution_result:
+-                            await self.audit_store.record_tool_execution(
+-                                run_id=run_id,
+-                                tool_call_id=tool_call_id,
+-                                tool_name=tool_name,
+-                                tool_version=recovery_res.committed_version or active_tool.version,
+-                                fingerprint=recovery_res.committed_fingerprint or "",
+-                                attempt_number=2,
+-                                is_repaired=True,
+-                                arguments=tool_args,
+-                                status="success",
+-                                result=recovery_res.execution_result.outcome or recovery_res.execution_result.result,
+-                                failure=None,
+-                                timing={"duration_ms": recovery_res.execution_result.duration_ms} if recovery_res.execution_result else None,
+-                                operation_identity=exec_result.operation_identity.key if exec_result.operation_identity else None,
+-                            )
+-
+                         # Refresh model bindings from committed registry definitions before the next model invocation
+                         current_active_tools = {t.name: t for t in self.registry.list_tools()}
+                         bound_model = active_model.bind_tools(get_langchain_tool_specs(current_active_tools))
+@@ -533,25 +555,37 @@ class HealingAgent:
+                             "error": redact_secrets(err_dict),
+                         })
+ 
++                if had_uncertain_write or (recovery_res is not None and not recovery_res.recovered):
++                    recovery_exhausted = True
++                    termination_reason = "uncertain_write" if had_uncertain_write else "recovery_exhausted"
++                    break
++
++            if recovery_exhausted or termination_reason in ("deadline_exceeded", "max_tool_calls_exceeded"):
++                break
++
+         if not termination_reason:
+             termination_reason = "max_turns_exceeded"
+ 
+         # 6. Independent Downstream State Verification
+         verif_ctx = ExecutionContext(run_id=run_id)
+-        verify_result = await executor.execute(
+-            tool_name_or_def="get_ticket",
+-            arguments={"ticket_id": target_ticket},
+-            context=verif_ctx,
+-        )
++        try:
++            verify_result = await asyncio.wait_for(executor.execute(
++                tool_name_or_def="get_ticket",
++                arguments={"ticket_id": target_ticket},
++                context=verif_ctx,
++            ), timeout=max(0.0, deadline - time.perf_counter()))
++        except asyncio.TimeoutError:
++            verify_result = None
++            termination_reason = "deadline_exceeded"
+ 
+         verified_assignee = None
+         verified_ticket_id = None
+         downstream_verified = False
+ 
+-        if verify_result.is_success and verify_result.outcome:
++        if verify_result is not None and verify_result.is_success and verify_result.outcome:
+             verified_assignee = str(verify_result.outcome.get("assignee_id") or "")
+             verified_ticket_id = verify_result.outcome.get("ticket_id")
+-            downstream_verified = bool(verified_assignee and verified_assignee != "None")
++            downstream_verified = (resolved_user_id is not None and str(verified_assignee) == str(resolved_user_id) and str(verified_ticket_id) == str(target_ticket))
+ 
+         duration_ms = round((time.perf_counter() - start_perf) * 1000, 2)
+ 
+@@ -566,8 +600,16 @@ class HealingAgent:
+                 "diagnosis_token_details": diagnosis_tokens_details if total_diagnosis_tokens > 0 else None,
+             }
+ 
++        if not has_token_usage:
++            token_usage_dict = {"prompt_tokens": total_input_tokens + diagnosis_tokens_details["input_tokens"],
++                "completion_tokens": total_output_tokens + diagnosis_tokens_details["output_tokens"],
++                "total_tokens": total_input_tokens + total_output_tokens + total_diagnosis_tokens,
++                "diagnosis_tokens": total_diagnosis_tokens, "is_complete": False, "status": "incomplete_subtotal"}
++        else:
++            token_usage_dict["is_complete"] = True
++
+         # Determine Final Workflow Success
+-        is_successful_run = downstream_verified and not had_uncertain_write
++        is_successful_run = downstream_verified and not had_uncertain_write and not recovery_exhausted and termination_reason == "model_completed"
+ 
+         final_outcome: Dict[str, Any] = {
+             "ticket_id": target_ticket,
+diff --git a/orchestrator/api/routes.py b/orchestrator/api/routes.py
+index 4bc2c90..796a200 100644
+--- a/orchestrator/api/routes.py
++++ b/orchestrator/api/routes.py
+@@ -35,7 +35,7 @@ ALLOWED_SCENARIOS = {
+     "ambiguous_mapping",
+ }
+ 
+-ALLOWED_EVIDENCE_LEVELS = {"ordinary", "minimal", "rich"}
++ALLOWED_EVIDENCE_LEVELS = {"ordinary", "explicit_hint"}
+ 
+ VALID_MODES = {"normal", "healing", "baseline"}
+ VALID_EXECUTION_TYPES = {None, "deterministic", "model_driven_baseline", "model_driven_healing"}
+@@ -70,6 +70,7 @@ class RunSummaryResponse(BaseModel):
+     model_usage: Optional[Dict[str, Any]] = None
+     termination_reason: Optional[str] = None
+     execution_type: Optional[str] = None
++    audit_status: str = "complete"
+ 
+ 
+ class AdminMutationRequest(BaseModel):
+@@ -120,7 +121,7 @@ async def create_run(request: CreateRunRequest, req: Request):
+ 
+     effective_exec_type = request.execution_type
+     if effective_exec_type is None:
+-        effective_exec_type = "model_driven_baseline" if request.mode == "baseline" else "deterministic"
++        effective_exec_type = {"baseline": "model_driven_baseline", "healing": "model_driven_healing", "normal": "deterministic"}[request.mode]
+ 
+     # 2. Gate Admission
+     gate: AppAdmissionGate = getattr(req.app.state, "admission_gate", None) or admission_gate
+@@ -155,8 +156,10 @@ async def create_run(request: CreateRunRequest, req: Request):
+                 execution_type=effective_exec_type,
+                 created_at=now_iso,
+             )
+-        except Exception:
+-            pass
++        except BaseException:
++            workflow_manager._runs_store.pop(run_id, None)
++            await gate.release_run(run_id)
++            raise
+ 
+     # 4. Managed Background Task Definition
+     app_registry = getattr(req.app.state, "registry", None)
+@@ -172,6 +175,7 @@ async def create_run(request: CreateRunRequest, req: Request):
+                     task=request.task,
+                     client=app_client,
+                 )
++                result["mode"] = request.mode
+                 workflow_manager._runs_store[run_id] = result
+             elif effective_exec_type == "model_driven_healing":
+                 from orchestrator.agents.healing import HealingAgent
+@@ -181,6 +185,7 @@ async def create_run(request: CreateRunRequest, req: Request):
+                     task=request.task,
+                     client=app_client,
+                 )
++                result["mode"] = request.mode
+                 workflow_manager._runs_store[run_id] = result
+             else:
+                 if audit_store:
+@@ -192,6 +197,7 @@ async def create_run(request: CreateRunRequest, req: Request):
+                     registry=app_registry,
+                     client=app_client,
+                 )
++                result["mode"] = request.mode
+                 workflow_manager._runs_store[run_id] = result
+         except asyncio.CancelledError:
+             completed_iso = datetime.now(timezone.utc).isoformat()
+@@ -225,7 +231,8 @@ async def create_run(request: CreateRunRequest, req: Request):
+             raise
+         except Exception as exc:
+             completed_iso = datetime.now(timezone.utc).isoformat()
+-            err_msg = f"Unexpected execution failure: {str(exc)}"
++            from orchestrator.client.mock_client import redact_secrets
++            err_msg = redact_secrets(f"Unexpected execution failure: {str(exc)}")
+             failed_record = {
+                 "run_id": run_id,
+                 "status": "failed",
+@@ -260,14 +267,26 @@ async def create_run(request: CreateRunRequest, req: Request):
+                 except Exception:
+                     pass
+         finally:
+-            await gate.release_run(run_id)
++            try:
++                record = workflow_manager.get_run(run_id)
++                if audit_store and record and record.get("status") != "running":
++                    await audit_store.record_run_completed(run_id=run_id, status=record["status"], duration_ms=record.get("duration_ms"), verified_outcome=record.get("outcome"), error=record.get("error"), termination_reason=record.get("termination_reason"), completed_at=record.get("completed_at"))
++                try:
++                    await event_broadcaster.flush(run_id)
++                except Exception:
++                    if record:
++                        record["audit_status"] = "incomplete"
++                    if audit_store:
++                        await audit_store.mark_audit_incomplete(run_id)
++            finally:
++                await gate.release_run(run_id)
+ 
+     # 5. Spawn Task in AppTaskManager
+     task_manager: AppTaskManager = getattr(req.app.state, "task_manager", None) or app_task_manager
+     run_task = task_manager.spawn_run_task(run_id, _execute_workflow_task())
+ 
+     if request.wait:
+-        await run_task
++        await asyncio.shield(run_task)
+         final_record = workflow_manager.get_run(run_id) or initial_record
+         return RunSummaryResponse(**final_record)
+     else:
+@@ -297,6 +316,7 @@ async def get_run_status(run_id: str, req: Request):
+                 error=persisted.error,
+                 termination_reason=persisted.termination_reason,
+                 execution_type=persisted.execution_type,
++                audit_status=persisted.audit_status,
+             )
+ 
+     raise HTTPException(
+@@ -376,6 +396,13 @@ async def get_run_events_stream(
+             detail=f"Conflicting Last-Event-ID header ({header_val}) and query cursor ({query_val})"
+         )
+ 
++    if cursor is not None and last_event_id not in (None, ""):
++        try:
++            if int(last_event_id) != cursor:
++                raise ValueError()
++        except ValueError:
++            raise HTTPException(status_code=400, detail="Conflicting query cursors")
++
+     effective_cursor = header_val if header_val is not None else (query_val if query_val is not None else 0)
+ 
+     # 3. Stream Generator
+@@ -389,6 +416,7 @@ async def get_run_events_stream(
+             historical_events: List[RunEvent] = []
+             if audit_store:
+                 try:
++                    await event_broadcaster.flush(run_id)
+                     db_events = await audit_store.get_run_events(run_id)
+                     historical_events = [
+                         RunEvent(
+@@ -403,7 +431,10 @@ async def get_run_events_stream(
+                         for pe in db_events
+                     ]
+                 except Exception:
+-                    historical_events = event_broadcaster.get_events(run_id)
++                    import logging
++                    logging.getLogger(__name__).exception("Durable replay unavailable")
++                    yield 'event: error\ndata: {"error":"audit_unavailable","message":"Durable replay unavailable"}\n\n'
++                    return
+             else:
+                 historical_events = event_broadcaster.get_events(run_id)
+ 
+@@ -424,6 +455,7 @@ async def get_run_events_stream(
+                     current_status = prun.status
+ 
+             if current_status in ("completed", "failed", "interrupted"):
++                await event_broadcaster.flush(run_id)
+                 # Drain any remaining events in subscriber queue
+                 while not subscriber.queue.empty():
+                     ev = subscriber.queue.get_nowait()
+@@ -465,6 +497,9 @@ async def get_run_events_stream(
+                         if event.type in ("run_completed", "run_failed", "run_interrupted"):
+                             break
+                 except asyncio.TimeoutError:
++                    state = workflow_manager.get_run(run_id)
++                    if state and state.get("status") in ("completed", "failed", "interrupted"):
++                        break
+                     # Keepalive idle heartbeat comment (not parsed as an event)
+                     yield ": ping\n\n"
+ 
+@@ -508,10 +543,10 @@ async def get_patches(req: Request, limit: int = 50, offset: int = 0):
+         records = await audit_store.get_all_repair_attempts(limit=limit, offset=offset)
+         repair_history = [r.model_dump() for r in records]
+ 
+-    patches = healing_engine.get_patches()
++    patches = [r for r in repair_history if r.get("registry_committed")]
+     return {
+-        "status": "pending_member_2",
+-        "notice": "Autonomous patch history retrieved from SQLite audit store." if repair_history else "Autonomous patch registry is pending Member 2 implementation.",
++        "status": "available",
++        "notice": "Persisted repair history; archived definitions are not active registry state.",
+         "active_patches": patches,
+         "repair_history": repair_history,
+         "limit": limit,
+@@ -545,6 +580,9 @@ async def demo_reset(req: Request):
+     try:
+         mock_details = await admin_client.reset()
+         mock_status = "reset_successful"
++    except asyncio.CancelledError:
++        await gate.mark_reset_failed("Reset cancelled; outcome unknown")
++        raise
+     except Exception as e:
+         reset_failed = True
+         fail_reason = str(e)
+@@ -604,10 +642,13 @@ async def demo_mutation(mutation_req: AdminMutationRequest, req: Request):
+             evidence_level=mutation_req.evidence_level,
+         )
+         return res
+-    except Exception as e:
++    except BaseException as e:
++        await gate.mark_reset_failed("Mutation outcome unknown; reset required")
++        if isinstance(e, asyncio.CancelledError):
++            raise
+         raise HTTPException(
+             status_code=status.HTTP_502_BAD_GATEWAY,
+-            detail=f"Downstream mutation configuration failed: {str(e)}"
++            detail="Downstream mutation configuration failed; reset required"
+         )
+     finally:
+         await gate.release_mutation()
+diff --git a/orchestrator/app.py b/orchestrator/app.py
+index 0f31355..fabc121 100644
+--- a/orchestrator/app.py
++++ b/orchestrator/app.py
+@@ -23,7 +23,7 @@ async def lifespan(app: FastAPI):
+     if not hasattr(app.state, "registry") or app.state.registry is None:
+         app.state.registry = VersionedToolRegistry.create_default()
+     if not hasattr(app.state, "mock_client") or app.state.mock_client is None:
+-        app.state.mock_client = MockBusinessApiClient(base_url=settings.mock_api_url)
++        app.state.mock_client = MockBusinessApiClient(base_url=settings.mock_api_url, credential_resolver=lambda ref: settings.assignment_token if ref == "secops_auth" else None)
+     if not hasattr(app.state, "admin_client") or app.state.admin_client is None:
+         app.state.admin_client = MockAdminApiClient(base_url=settings.mock_api_url)
+     if not hasattr(app.state, "audit_store") or app.state.audit_store is None:
+@@ -41,7 +41,8 @@ async def lifespan(app: FastAPI):
+     yield
+ 
+     # Managed shutdown sequence: cancel and await background tasks within finite budget
+-    await app_task_manager.cancel_and_wait_all(timeout=5.0)
++    await app.state.task_manager.cancel_and_wait_all(timeout=5.0)
++    await event_broadcaster.flush()
+ 
+     # Safely close clients
+     if hasattr(app.state, "mock_client") and app.state.mock_client:
+@@ -59,7 +60,7 @@ app = FastAPI(
+ 
+ # Initialize registry, client, and audit store on app state for direct ASGI test clients
+ app.state.registry = VersionedToolRegistry.create_default()
+-app.state.mock_client = MockBusinessApiClient(base_url=settings.mock_api_url)
++app.state.mock_client = MockBusinessApiClient(base_url=settings.mock_api_url, credential_resolver=lambda ref: settings.assignment_token if ref == "secops_auth" else None)
+ app.state.admin_client = MockAdminApiClient(base_url=settings.mock_api_url)
+ app.state.audit_store = SQLiteAuditStore(db_path=settings.sqlite_db_path)
+ app.state.admission_gate = admission_gate
+diff --git a/orchestrator/audit/store.py b/orchestrator/audit/store.py
+index ea6128c..0c4c977 100644
+--- a/orchestrator/audit/store.py
++++ b/orchestrator/audit/store.py
+@@ -1,6 +1,7 @@
+ """SQLite-backed persistent audit store for DriftGuard.
+ """
+ from __future__ import annotations
++import threading
+ import sqlite3
+ import json
+ import os
+@@ -45,12 +46,13 @@ class SQLiteAuditStore:
+     - Demo reset preserves audit history; no destructive purge endpoint.
+     """
+ 
+-    SCHEMA_VERSION = 1
++    SCHEMA_VERSION = 2
+ 
+     def __init__(self, db_path: Optional[str] = None, timeout: float = 5.0):
+         self.db_path = str(db_path or settings.sqlite_db_path)
+         self.timeout = timeout
+         self._initialized = False
++        self._init_lock = threading.Lock()
+ 
+     def _get_connection(self) -> sqlite3.Connection:
+         """Creates and configures a SQLite connection."""
+@@ -207,6 +209,18 @@ class SQLiteAuditStore:
+                     (1, datetime.now(timezone.utc).isoformat())
+                 )
+ 
++            if current_version < 2:
++                conn.execute("""CREATE TABLE IF NOT EXISTS pre_write_authorizations (
++                    run_id TEXT NOT NULL REFERENCES runs(run_id),
++                    operation_identity TEXT NOT NULL,
++                    candidate_id TEXT NOT NULL,
++                    timestamp TEXT NOT NULL,
++                    data TEXT NOT NULL,
++                    PRIMARY KEY (run_id, operation_identity, candidate_id)
++                );""")
++                conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, ?)",
++                    (datetime.now(timezone.utc).isoformat(),))
++
+             # Cleanup nonterminal runs from prior process interruptions
+             now_iso = datetime.now(timezone.utc).isoformat()
+             conn.execute("""
+@@ -222,11 +236,12 @@ class SQLiteAuditStore:
+ 
+     async def initialize(self):
+         """Asynchronously initializes the database."""
+-        await asyncio.to_thread(self._init_db_sync)
++        await asyncio.to_thread(self._ensure_init)
+ 
+     def _ensure_init(self):
+-        if not self._initialized:
+-            self._init_db_sync()
++        with self._init_lock:
++            if not self._initialized:
++                self._init_db_sync()
+ 
+     # -------------------------------------------------------------------------
+     # Runs Persistence
+@@ -285,9 +300,9 @@ class SQLiteAuditStore:
+                     verified_outcome = ?,
+                     error = ?,
+                     termination_reason = ?,
+-                    audit_status = ?
++                    audit_status = CASE WHEN audit_status = 'incomplete' OR ? = 'incomplete' THEN 'incomplete' ELSE 'complete' END
+                 WHERE run_id = ?;
+-            """, (status, now_iso, duration_ms, outcome_json, error, termination_reason, audit_status, run_id))
++            """, (status, now_iso, duration_ms, outcome_json, redact_secrets(error), termination_reason, audit_status, run_id))
+ 
+     async def record_run_completed(
+         self,
+@@ -551,10 +566,7 @@ class SQLiteAuditStore:
+                     VALUES (?, 'healing', 'Autonomous repair execution', 'running', ?, 'complete');
+                 """, (run_id, datetime.now(timezone.utc).isoformat()))
+ 
+-            # Record pre-write audit event
+-            seq_cursor = conn.execute("SELECT COUNT(*) as c FROM events WHERE run_id = ?;", (run_id,))
+-            seq = (seq_cursor.fetchone()["c"] or 0) + 1
+-
++            # Separate internal authorization records from the public SSE sequence.
+             now_iso = datetime.now(timezone.utc).isoformat()
+             pre_write_data = json.dumps({
+                 "pre_write_authorization": True,
+@@ -565,9 +577,9 @@ class SQLiteAuditStore:
+                 "operation_identity": operation_identity,
+             })
+             conn.execute("""
+-                INSERT OR IGNORE INTO events (run_id, sequence, timestamp, mode, event_type, tool, data)
+-                VALUES (?, ?, ?, 'healing', 'pre_write_audit_authorized', ?, ?);
+-            """, (run_id, seq, now_iso, tool_name, pre_write_data))
++                INSERT OR IGNORE INTO pre_write_authorizations (run_id, operation_identity, candidate_id, timestamp, data)
++                VALUES (?, ?, ?, ?, ?);
++            """, (run_id, operation_identity, candidate_id, now_iso, pre_write_data))
+ 
+     async def record_pre_write_audit(
+         self,
+diff --git a/orchestrator/client/mock_client.py b/orchestrator/client/mock_client.py
+index e1478dc..1a653e9 100644
+--- a/orchestrator/client/mock_client.py
++++ b/orchestrator/client/mock_client.py
+@@ -34,6 +34,11 @@ LEGITIMATE_KEY_ALLOWLIST = {
+     "user_id",
+     "assignee_id",
+     "key_id",
++    "diagnosis_tokens", "prompt_tokens", "completion_tokens", "total_tokens",
++    "input_tokens", "output_tokens", "agent_tokens", "token_usage",
++    "model_usage", "diagnosis_token_details", "agent_token_usage",
++    "diagnosis_token_usage", "session_token_usage", "authorized_for_recovery",
++    "credential_reference", "credential_ref", "required_credential_reference",
+ }
+ 
+ SENSITIVE_KEY_SUBSTRINGS = [
+diff --git a/orchestrator/config.py b/orchestrator/config.py
+index af0536e..717ffa3 100644
+--- a/orchestrator/config.py
++++ b/orchestrator/config.py
+@@ -1,3 +1,4 @@
++from pydantic import Field
+ from pydantic_settings import BaseSettings, SettingsConfigDict
+ from typing import Optional
+ 
+@@ -11,7 +12,8 @@ class OrchestratorSettings(BaseSettings):
+     model_api_key: Optional[str] = None
+     sqlite_db_path: str = "driftguard.sqlite3"
+     log_level: str = "INFO"
+-    cors_origins: list[str] = ["*"]
++    cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
++    assignment_token: Optional[str] = Field(default=None, repr=False)
+ 
+     model_config = SettingsConfigDict(
+         env_prefix="ORCHESTRATOR_",
+diff --git a/orchestrator/execution/events.py b/orchestrator/execution/events.py
+index 1c743b6..72b1304 100644
+--- a/orchestrator/execution/events.py
++++ b/orchestrator/execution/events.py
+@@ -7,23 +7,7 @@ from pathlib import Path
+ from orchestrator.models import RunEvent, RunEventType
+ 
+ 
+-def redact_secrets(data: Any) -> Any:
+-    """Recursively redacts sensitive keys such as authorization tokens or API keys."""
+-    if isinstance(data, dict):
+-        redacted = {}
+-        for k, v in data.items():
+-            k_lower = k.lower()
+-            if any(s in k_lower for s in ["auth", "token", "secret", "password", "key", "credential"]):
+-                if k_lower.endswith("_tokens") or k_lower in ("tokens", "token_usage") or k_lower.endswith("_token_count"):
+-                    redacted[k] = redact_secrets(v)
+-                else:
+-                    redacted[k] = "[REDACTED]"
+-            else:
+-                redacted[k] = redact_secrets(v)
+-        return redacted
+-    elif isinstance(data, list):
+-        return [redact_secrets(item) for item in data]
+-    return data
++from orchestrator.client.mock_client import redact_secrets
+ 
+ 
+ class EventSubscriber:
+@@ -41,6 +25,8 @@ class EventBroadcaster:
+         self._subscribers_by_run: Dict[str, List[EventSubscriber]] = {}
+         self._schema: Optional[Dict[str, Any]] = None
+         self._audit_store = audit_store
++        self._persistence_tasks = {}
++        self._persistence_errors = {}
+         self._load_schema()
+ 
+     def set_audit_store(self, audit_store: Any):
+@@ -63,6 +49,8 @@ class EventBroadcaster:
+         tool: Optional[str] = None,
+         data: Optional[Dict[str, Any]] = None
+     ) -> RunEvent:
++        if mode == "baseline":
++            mode = "normal"
+         if run_id not in self._events_by_run:
+             self._events_by_run[run_id] = []
+         
+@@ -90,40 +78,55 @@ class EventBroadcaster:
+ 
+         self._events_by_run[run_id].append(event)
+ 
+-        # Notify any active legacy SSE listeners
+-        if run_id in self._listeners_by_run:
+-            for q in self._listeners_by_run[run_id]:
+-                try:
+-                    q.put_nowait(event)
+-                except asyncio.QueueFull:
+-                    pass
+-
+-        # Notify any active bounded EventSubscribers
+-        if run_id in self._subscribers_by_run:
+-            for sub in list(self._subscribers_by_run[run_id]):
+-                try:
+-                    sub.queue.put_nowait(event)
+-                except asyncio.QueueFull:
+-                    sub.overflowed = True
+-
+-        # Persist event to audit store if available
+         if self._audit_store:
++            previous = self._persistence_tasks.get(run_id)
++            store = self._audit_store
++            async def persist_then_deliver():
++                try:
++                    if previous is not None:
++                        await previous
++                    if run_id in self._persistence_errors:
++                        raise RuntimeError("Earlier event failed persistence")
++                    await store.record_event(run_id=run_id, sequence=sequence, timestamp=now_iso,
++                        mode=mode, event_type=event_type, tool=tool, data=clean_data)
++                    self._deliver(event)
++                except Exception as exc:
++                    self._persistence_errors[run_id] = exc
++                    try:
++                        await store.mark_audit_incomplete(run_id)
++                    except Exception:
++                        pass
+             try:
+-                loop = asyncio.get_running_loop()
+-                loop.create_task(self._audit_store.record_event(
+-                    run_id=run_id,
+-                    sequence=sequence,
+-                    timestamp=now_iso,
+-                    mode=mode,
+-                    event_type=event_type,
+-                    tool=tool,
+-                    data=clean_data,
+-                ))
++                self._persistence_tasks[run_id] = asyncio.create_task(persist_then_deliver())
+             except RuntimeError:
+-                pass
++                self._persistence_errors[run_id] = RuntimeError("No event loop for durable event persistence")
++        else:
++            self._deliver(event)
+ 
+         return event
+ 
++    def _deliver(self, event: RunEvent) -> None:
++        for q in self._listeners_by_run.get(event.run_id, []):
++            try:
++                q.put_nowait(event)
++            except asyncio.QueueFull:
++                pass
++        for sub in list(self._subscribers_by_run.get(event.run_id, [])):
++            try:
++                sub.queue.put_nowait(event)
++            except asyncio.QueueFull:
++                sub.overflowed = True
++
++    async def flush(self, run_id: Optional[str] = None) -> None:
++        """Wait for serialized durable publication; surface storage failures."""
++        keys = [run_id] if run_id is not None else list(self._persistence_tasks)
++        for key in keys:
++            task = self._persistence_tasks.get(key)
++            if task is not None:
++                await asyncio.shield(task)
++            if key in self._persistence_errors:
++                raise RuntimeError("Event audit persistence failed") from self._persistence_errors[key]
++
+     def get_events(self, run_id: str) -> List[RunEvent]:
+         return list(self._events_by_run.get(run_id, []))
+ 
+@@ -162,6 +165,8 @@ class EventBroadcaster:
+     def reset(self):
+         """Resets all in-memory events and listeners."""
+         self._events_by_run.clear()
++        self._persistence_tasks.clear()
++        self._persistence_errors.clear()
+         self._listeners_by_run.clear()
+         self._subscribers_by_run.clear()
+ 
+diff --git a/orchestrator/execution/tool_executor.py b/orchestrator/execution/tool_executor.py
+index 25b14eb..62a3d74 100644
+--- a/orchestrator/execution/tool_executor.py
++++ b/orchestrator/execution/tool_executor.py
+@@ -192,6 +192,10 @@ class ToolExecutor:
+         if not snapshot.fingerprint:
+             snapshot.fingerprint = snapshot.compute_fingerprint()
+ 
++        approved = {("find_user", "GET", "/users"), ("assign_ticket", "POST", "/tickets/assign"), ("get_ticket", "GET", "/tickets/{ticket_id}")}
++        if (snapshot.name, snapshot.method.upper(), snapshot.endpoint) not in approved:
++            raise ValueError("Unapproved business tool destination")
++
+         # 3. Setup logical execution context & identity
+         if context is None:
+             context = ExecutionContext(
+@@ -410,7 +414,13 @@ class ToolExecutor:
+             headers["Idempotency-Key"] = idempotency_key
+ 
+         if auth_token:
+-            headers["Authorization"] = f"Bearer {auth_token}"
++            marker = "{" + snapshot.credential_reference + "}"
++            has_binding = any(marker in value for value in headers.values())
++            if not has_binding:
++                headers["Authorization"] = f"Bearer {auth_token}"
++            for header, value in list(headers.items()):
++                if marker in value:
++                    headers[header] = value.replace(marker, auth_token)
+ 
+         # Body
+         json_body: Optional[Any] = None
+@@ -557,6 +567,7 @@ class ToolExecutor:
+                 write_attempted=is_write,
+                 uncertain_write=uncertain,
+                 migration_hint=norm_failure.migration_hint,
++                validation_details=norm_failure.normalized_errors,
+                 known_secrets=known_sec_list,
+             )
+ 
+diff --git a/orchestrator/execution/workflow.py b/orchestrator/execution/workflow.py
+index 4af980b..dd297b8 100644
+--- a/orchestrator/execution/workflow.py
++++ b/orchestrator/execution/workflow.py
+@@ -255,7 +255,13 @@ class WorkflowExecutionManager:
+                 if candidate_snapshot and candidate_snapshot.name == "assign_ticket"
+                 else active_registry.get("assign_ticket")
+             )
+-            assign_args = {"ticket_id": target_ticket, "user_id": maya_id}
++            props = assign_tool.argument_schema.properties
++            if "target" in props:
++                leaf_type = props["target"]["properties"]["id"].get("type")
++                assign_args = {"ticket_id": target_ticket, "target": {"id": int(maya_id) if leaf_type == "integer" else maya_id}}
++            else:
++                field = "assignee_id" if "assignee_id" in props else "user_id"
++                assign_args = {"ticket_id": target_ticket, field: int(maya_id) if props[field].get("type") == "integer" else maya_id}
+             assign_idemp_key = f"dg-idemp-assign-{target_ticket}-{uuid.uuid4().hex[:8]}"
+ 
+             event_broadcaster.publish_event(
+@@ -389,7 +395,7 @@ class WorkflowExecutionManager:
+                             executor=executor,
+                             event_broadcaster=event_broadcaster,
+                             approved_header_credentials={"Authorization": "secops_auth"},
+-                            execution_guarantees={"pre_execution_rejection": True},
++                            execution_guarantees={},
+                             audit_store=self.audit_store,
+                         )
+                         recovery_res = await rec_ctrl.recover_failure(
+diff --git a/orchestrator/healing/contract_patch.py b/orchestrator/healing/contract_patch.py
+new file mode 100644
+index 0000000..afde224
+--- /dev/null
++++ b/orchestrator/healing/contract_patch.py
+@@ -0,0 +1,78 @@
++"""Restricted contract transformation shared by preview and independent derivation.
++
++Evidence authorization is deliberately separate in validator.py.
++"""
++import copy
++import re
++from orchestrator.models import RestrictedOperationType as Op
++
++
++def derive_contract(snapshot, operations, arguments=None):
++    candidate = copy.deepcopy(snapshot)
++    args = copy.deepcopy(arguments) if arguments is not None else None
++    body = candidate.request_mapping.setdefault("body", {})
++    moves = {op.source_path: op.target_path for op in operations if op.operation_type in (Op.RENAME_ARGUMENT, Op.NEST_ARGUMENT)}
++    for op in operations:
++        if op.operation_type == Op.SET_HEADER:
++            candidate.credential_reference = op.credential_reference
++            candidate.headers[op.target_path] = ("Bearer " if op.target_path.lower() == "authorization" else "") + "{" + op.credential_reference + "}"
++        elif op.operation_type in (Op.RENAME_ARGUMENT, Op.NEST_ARGUMENT):
++            src, dst = op.source_path, op.target_path
++            if not src or not dst or not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", dst):
++                raise ValueError("Unsupported repair path")
++            if src not in body or src not in candidate.argument_schema.properties:
++                raise ValueError("Missing migration source")
++            if dst == src or dst.split('.')[0] in candidate.argument_schema.properties:
++                raise ValueError("Destination collision with existing argument")
++            schema_leaf = candidate.argument_schema.properties.pop(src)
++            was_required = src in candidate.argument_schema.required
++            if was_required:
++                candidate.argument_schema.required.remove(src)
++            props = candidate.argument_schema.properties
++            required = candidate.argument_schema.required
++            wire = body
++            value = args.pop(src) if args is not None else None
++            arg_parent = args
++            body.pop(src)
++            parts = dst.split('.')
++            for part in parts[:-1]:
++                if part in wire and not isinstance(wire[part], dict):
++                    raise ValueError("Wire destination collision")
++                node = props.setdefault(part, {"type": "object", "properties": {}, "required": []})
++                if node.get("type") != "object":
++                    raise ValueError("Schema destination collision")
++                if was_required and part not in required:
++                    required.append(part)
++                props, required = node['properties'], node['required']
++                wire = wire.setdefault(part, {})
++                if arg_parent is not None:
++                    arg_parent = arg_parent.setdefault(part, {})
++            leaf = parts[-1]
++            if leaf in wire or leaf in props:
++                raise ValueError("Destination collision")
++            props[leaf] = schema_leaf
++            if was_required:
++                required.append(leaf)
++            wire[leaf] = '{' + dst + '}'
++            if arg_parent is not None:
++                arg_parent[leaf] = value
++        elif op.operation_type == Op.CAST_TYPE:
++            target = moves.get(op.source_path, op.source_path or op.target_path)
++            props = candidate.argument_schema.properties
++            parent = args
++            parts = target.split('.')
++            for part in parts[:-1]:
++                props = props[part]['properties']
++                if parent is not None:
++                    parent = parent[part]
++            leaf = parts[-1]
++            policy = op.conversion_policy or ''
++            if policy not in ('to_integer', 'string_to_integer', 'to_string', 'integer_to_string'):
++                raise ValueError("Unsupported conversion")
++            props[leaf]['type'] = 'integer' if policy in ('to_integer', 'string_to_integer') else 'string'
++            if parent is not None:
++                parent[leaf] = int(parent[leaf]) if props[leaf]['type'] == 'integer' else str(parent[leaf])
++        else:
++            raise ValueError("Unsupported repair operation")
++    candidate.fingerprint = candidate.compute_fingerprint()
++    return candidate, args
+diff --git a/orchestrator/healing/llm_diagnosis.py b/orchestrator/healing/llm_diagnosis.py
+index 5005b07..117a438 100644
+--- a/orchestrator/healing/llm_diagnosis.py
++++ b/orchestrator/healing/llm_diagnosis.py
+@@ -48,6 +48,7 @@ MAX_EVIDENCE_PACKET_CHARS = 4000
+ 
+ class LLMOperationProposal(BaseModel):
+     """Structured operation proposal produced by the LLM diagnoser."""
++    model_config = {"extra": "forbid"}
+     operation_type: Literal["rename_argument", "nest_argument", "cast_type", "set_header"]
+     source_path: Optional[str] = None
+     target_path: Optional[str] = None
+@@ -60,6 +61,7 @@ class LLMOperationProposal(BaseModel):
+ 
+ class LLMDiagnosisResponse(BaseModel):
+     """Structured diagnosis response expected from the LLM diagnoser."""
++    model_config = {"extra": "forbid"}
+     status: Literal["proposed", "insufficient_evidence", "unsupported"]
+     explanation: str = ""
+     operations: List[LLMOperationProposal] = Field(default_factory=list)
+@@ -254,8 +256,6 @@ class LLMDiagnoser:
+             effective_timeout = min(self.timeout_sec, timeout_budget)
+ 
+         start_time = time.perf_counter()
+-        token_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+-
+         try:
+             call_coro = self.model.ainvoke(messages)
+             ai_msg: AIMessage = await asyncio.wait_for(call_coro, timeout=effective_timeout)
+@@ -280,25 +280,16 @@ class LLMDiagnoser:
+                 source="llm_assisted",
+             )
+ 
+-        # 5. Extract Token Usage Truthfully
+-        if hasattr(ai_msg, "usage_metadata") and isinstance(ai_msg.usage_metadata, dict):
+-            u = ai_msg.usage_metadata
+-            token_usage = {
+-                "input_tokens": u.get("input_tokens", 0),
+-                "output_tokens": u.get("output_tokens", 0),
+-                "total_tokens": u.get("total_tokens", 0),
+-            }
+-        elif hasattr(ai_msg, "response_metadata") and isinstance(ai_msg.response_metadata, dict):
+-            rm = ai_msg.response_metadata
+-            tu = rm.get("token_usage") or rm.get("usage") or {}
+-            if isinstance(tu, dict):
+-                in_tok = tu.get("prompt_tokens") or tu.get("input_tokens") or 0
+-                out_tok = tu.get("completion_tokens") or tu.get("output_tokens") or 0
+-                token_usage = {
+-                    "input_tokens": in_tok,
+-                    "output_tokens": out_tok,
+-                    "total_tokens": in_tok + out_tok,
+-                }
++        usage = getattr(ai_msg, "usage_metadata", None)
++        if not isinstance(usage, dict):
++            metadata = getattr(ai_msg, "response_metadata", {}) or {}
++            usage = metadata.get("token_usage") or metadata.get("usage") or {}
++        inp = usage.get("input_tokens", usage.get("prompt_tokens"))
++        out = usage.get("output_tokens", usage.get("completion_tokens"))
++        complete = isinstance(inp, int) and isinstance(out, int)
++        token_usage = {"input_tokens": inp if isinstance(inp, int) else 0,
++                       "output_tokens": out if isinstance(out, int) else 0,
++                       "total_tokens": (inp or 0) + (out or 0), "is_complete": complete}
+ 
+         # 6. Parse and Validate Structured Output
+         raw_content = ai_msg.content if isinstance(ai_msg.content, str) else str(ai_msg.content)
+@@ -529,40 +520,14 @@ class LLMDiagnoser:
+         raw_hash = json.dumps(plan_dict, sort_keys=True).encode("utf-8")
+         prop_fp = hashlib.sha256(raw_hash).hexdigest()[:16]
+ 
+-        # 10. Generate Candidate Preview
+-        preview = snapshot.model_copy(deep=True)
+-        preview.status = "proposed_unvalidated"
+-        new_req_mapping = copy.deepcopy(preview.request_mapping)
+-        body_mapping = new_req_mapping.get("body", {})
+-
+-        for op in sorted_ops:
+-            if op.operation_type == RestrictedOperationType.SET_HEADER:
+-                preview.headers[op.target_path] = (
+-                    f"Bearer {{{op.credential_reference}}}"
+-                    if "auth" in op.target_path.lower()
+-                    else f"{{{op.credential_reference}}}"
+-                )
+-            elif op.operation_type == RestrictedOperationType.RENAME_ARGUMENT:
+-                if isinstance(body_mapping, dict) and op.source_path in body_mapping:
+-                    orig_val = body_mapping.pop(op.source_path)
+-                    body_mapping[op.target_path] = orig_val
+-            elif op.operation_type == RestrictedOperationType.NEST_ARGUMENT:
+-                if isinstance(body_mapping, dict) and op.source_path in body_mapping:
+-                    orig_val = body_mapping.pop(op.source_path)
+-                    parts = op.target_path.split(".")
+-                    curr = body_mapping
+-                    for part in parts[:-1]:
+-                        curr = curr.setdefault(part, {})
+-                    curr[parts[-1]] = orig_val
+-            elif op.operation_type == RestrictedOperationType.CAST_TYPE:
+-                target_type = "integer" if "integer" in (op.conversion_policy or "").lower() else "string"
+-                target_field = op.target_path or op.source_path
+-                if target_field and target_field in preview.argument_schema.properties:
+-                    prop = dict(preview.argument_schema.properties[target_field])
+-                    prop["type"] = target_type
+-                    preview.argument_schema.properties[target_field] = prop
+-
+-        preview.request_mapping = new_req_mapping
++        from orchestrator.healing.contract_patch import derive_contract
++        try:
++            preview, _ = derive_contract(snapshot, sorted_ops)
++            preview.status = "proposed_unvalidated"
++        except (ValueError, KeyError, TypeError) as exc:
++            return PlanningResult(status=PlanningStatus.UNSUPPORTED, tool_name=snapshot.name,
++                base_version=snapshot.version, base_fingerprint=base_fingerprint,
++                reasons=[str(exc)], source="llm_assisted", diagnosis_tokens=token_usage)
+ 
+         # 11. Construct RepairProposal
+         proposal_id = f"prop-llm-{uuid.uuid4().hex[:8]}"
+diff --git a/orchestrator/healing/planner.py b/orchestrator/healing/planner.py
+index 388c3bf..d8e85a7 100644
+--- a/orchestrator/healing/planner.py
++++ b/orchestrator/healing/planner.py
+@@ -135,6 +135,10 @@ def plan_repair(
+         "hint": hint_text,
+     }
+ 
++    prefix = "response_evidence.body.error" if isinstance(body_dict.get("error"), dict) else "response_evidence.body"
++    detail_prefix = prefix + ".details"
++    migration_evidence_path = detail_prefix + ".migration_mapping" if isinstance(details.get("migration_mapping"), dict) else prefix + ".hint"
++    type_evidence_path = detail_prefix + (".expected_types" if details.get("expected_types") else ".expected_schema")
+     operations: List[PlannedOperation] = []
+     missing_requirements: List[str] = []
+     refusal_reasons: List[str] = []
+@@ -166,7 +170,7 @@ def plan_repair(
+                     target_path=req_hdr,
+                     credential_reference=cred_ref,
+                     value_provenance=f"approved_credential_reference:{cred_ref}",
+-                    evidence_path="response_evidence.body.error.details.required_headers",
++                    evidence_path=detail_prefix + ".required_headers",
+                     evidence_summary=f"Downstream service returned explicit requirement for header '{req_hdr}', mapped via approved credential reference '{cred_ref}'.",
+                 )
+             )
+@@ -287,7 +291,7 @@ def plan_repair(
+                     source_path=src_field,
+                     target_path=tgt_path,
+                     value_provenance=f"caller_argument:{src_field}",
+-                    evidence_path="response_evidence.body.error.details.migration_hint",
++                    evidence_path=migration_evidence_path,
+                     evidence_summary=f"Evidenced migration maps argument '{src_field}' into nested wire path '{tgt_path}'.",
+                 )
+             )
+@@ -299,7 +303,7 @@ def plan_repair(
+                     source_path=src_field,
+                     target_path=tgt_path,
+                     value_provenance=f"caller_argument:{src_field}",
+-                    evidence_path="response_evidence.body.error.details.migration_hint",
++                    evidence_path=migration_evidence_path,
+                     evidence_summary=f"Evidenced migration renames wire parameter '{src_field}' to '{tgt_path}'.",
+                 )
+             )
+@@ -357,7 +361,7 @@ def plan_repair(
+                         target_path=tgt_path,
+                         conversion_policy=policy,
+                         value_provenance=f"caller_argument:{src_field}",
+-                        evidence_path="response_evidence.body.error.details.expected_schema",
++                        evidence_path=type_evidence_path,
+                         evidence_summary=f"Evidenced expected schema requires '{tgt_path}' to be '{exp_type}', currently '{curr_type}'.",
+                     )
+                 )
+@@ -449,39 +453,14 @@ def plan_repair(
+     preview = copy.deepcopy(snapshot)
+     preview.status = "proposed_unvalidated"
+ 
+-    # Apply operations to preview's request_mapping
+-    new_req_mapping = copy.deepcopy(preview.request_mapping)
+-    body_mapping = new_req_mapping.setdefault("body", {})
+-
+-    for op in sorted_ops:
+-        if op.operation_type == RestrictedOperationType.SET_HEADER:
+-            if op.credential_reference:
+-                preview.credential_reference = op.credential_reference
+-            preview.headers[op.target_path] = f"Bearer {{{op.credential_reference}}}" if "auth" in op.target_path.lower() else f"{{{op.credential_reference}}}"
+-        elif op.operation_type == RestrictedOperationType.RENAME_ARGUMENT:
+-            if isinstance(body_mapping, dict) and op.source_path in body_mapping:
+-                orig_val = body_mapping.pop(op.source_path)
+-                body_mapping[op.target_path] = orig_val
+-        elif op.operation_type == RestrictedOperationType.NEST_ARGUMENT:
+-            if isinstance(body_mapping, dict) and op.source_path in body_mapping:
+-                orig_val = body_mapping.pop(op.source_path)
+-                parts = op.target_path.split(".")
+-                curr = body_mapping
+-                for part in parts[:-1]:
+-                    curr = curr.setdefault(part, {})
+-                curr[parts[-1]] = orig_val
+-        elif op.operation_type == RestrictedOperationType.CAST_TYPE:
+-            target_type = "integer" if "integer" in (op.conversion_policy or "").lower() else "string"
+-            if op.source_path and op.source_path in preview.argument_schema.properties:
+-                prop = dict(preview.argument_schema.properties[op.source_path])
+-                prop["type"] = target_type
+-                preview.argument_schema.properties[op.source_path] = prop
+-            elif op.target_path and op.target_path in preview.argument_schema.properties:
+-                prop = dict(preview.argument_schema.properties[op.target_path])
+-                prop["type"] = target_type
+-                preview.argument_schema.properties[op.target_path] = prop
+-
+-    preview.request_mapping = new_req_mapping
++    from orchestrator.healing.contract_patch import derive_contract
++    try:
++        preview, _ = derive_contract(snapshot, sorted_ops)
++        preview.status = "proposed_unvalidated"
++    except (ValueError, KeyError, TypeError) as exc:
++        return PlanningResult(status=PlanningStatus.UNSUPPORTED, tool_name=snapshot.name,
++            base_version=snapshot.version, base_fingerprint=base_fingerprint,
++            reasons=[str(exc)], is_eligible=True, retry_safety=classification.retry_safety)
+ 
+     # -------------------------------------------------------------------------
+     # 10. Construct RepairProposal
+diff --git a/orchestrator/healing/recovery.py b/orchestrator/healing/recovery.py
+index 4c85185..8beccc9 100644
+--- a/orchestrator/healing/recovery.py
++++ b/orchestrator/healing/recovery.py
+@@ -66,6 +66,9 @@ class RecoveryResult(BaseModel):
+     committed_version: Optional[str] = None
+     committed_fingerprint: Optional[str] = None
+     business_effect_occurred: bool = False
++    write_accepted: bool = False
++    uncertain_write: bool = False
++    audit_incomplete: bool = False
+     verification_succeeded: bool = False
+     registry_committed: bool = False
+     execution_result: Optional[ExecutionResult] = None
+@@ -98,7 +101,7 @@ async def default_verify_business_intent(
+     """
+     if tool_name == "assign_ticket":
+         expected_ticket = original_arguments.get("ticket_id")
+-        expected_user = original_arguments.get("user_id") or original_arguments.get("assignee_id")
++        expected_user = original_arguments.get("user_id") or original_arguments.get("assignee_id") or original_arguments.get("target", {}).get("id")
+ 
+         if expected_ticket is None or expected_user is None:
+             return {
+@@ -174,7 +177,7 @@ class RecoveryController:
+         self.verifier = verifier or default_verify_business_intent
+         self.events = event_broadcaster or globals()["event_broadcaster"]
+         self.approved_header_credentials = approved_header_credentials or {}
+-        self.credential_resolver = credential_resolver
++        self.credential_resolver = credential_resolver or (lambda ref: bool(self.executor.client.credential_resolver(ref)))
+         self.execution_guarantees = execution_guarantees or {}
+         self.llm_diagnoser = llm_diagnoser
+         self.diagnosis_timeout = diagnosis_timeout
+@@ -186,12 +189,14 @@ class RecoveryController:
+         self._diagnosed_operations: Set[str] = set()
+         # Track operations that have had a repaired dispatch (max 1 repaired dispatch per operation)
+         self._dispatched_operations: Set[str] = set()
++        self._recovery_operations: Set[str] = set()
+ 
+     def reset_operation_tracking(self) -> None:
+         """Clears operation tracking sets for demo reset."""
+         self._attempted_proposals.clear()
+         self._diagnosed_operations.clear()
+         self._dispatched_operations.clear()
++        self._recovery_operations.clear()
+ 
+ 
+     def _emit_event(
+@@ -250,26 +255,61 @@ class RecoveryController:
+                 commit_latency_ms=res.commit_latency_ms,
+                 failed_recovery_duration_ms=res.failed_recovery_duration_ms,
+             )
+-            if res.diagnosis_tokens > 0:
++            if res.diagnosis_source == "llm_assisted":
+                 diag_inp = res.diagnosis_token_details.get("input_tokens") if res.diagnosis_token_details else None
+                 diag_out = res.diagnosis_token_details.get("output_tokens") if res.diagnosis_token_details else None
+                 await self.audit_store.record_model_usage(
+                     run_id=run_id,
+-                    call_id=f"diag-{res.proposal_fingerprint[:8] if res.proposal_fingerprint else res.tool_name}",
++                    call_id=f"diag-{res.candidate_id or res.proposal_fingerprint or res.tool_name}",
+                     purpose="diagnosis",
+                     prompt_tokens=diag_inp,
+                     completion_tokens=diag_out,
+                     total_tokens=res.diagnosis_tokens,
+-                    is_complete=True,
++                    is_complete=bool(res.diagnosis_token_details and res.diagnosis_token_details.get("is_complete", True)),
+                 )
+         except Exception:
+-            if res.business_effect_occurred:
++            res.audit_incomplete = True
++            if True:
+                 try:
+                     await self.audit_store.mark_audit_incomplete(run_id)
+                 except Exception:
+                     pass
+ 
+-    async def recover_failure(
++    async def recover_failure(self, observation, original_arguments, operation_identity, run_id,
++                              deadline=None, mode="healing") -> RecoveryResult:
++        """deadline is remaining seconds and covers lock, diagnosis, dispatch and verification."""
++        budget = 30.0 if deadline is None else max(0.0, deadline)
++        key = operation_identity.key if operation_identity else "unidentified"
++        start = time.perf_counter()
++        try:
++            async with asyncio.timeout(budget):
++                result = await self._recover_failure(observation, original_arguments, operation_identity,
++                    run_id, deadline=budget, mode=mode)
++        except TimeoutError:
++            result = RecoveryResult(status=RecoveryStatus.TIMEOUT, recovered=False,
++                tool_name=observation.tool_name, base_version=observation.registry_version,
++                base_fingerprint=observation.fingerprint, uncertain_write=key in self._dispatched_operations,
++                termination_reason="Overall recovery deadline exceeded; dispatched write may be uncertain")
++        except asyncio.CancelledError:
++            raise
++        except Exception:
++            result = RecoveryResult(status=RecoveryStatus.EXECUTION_FAILED, recovered=False,
++                tool_name=observation.tool_name, base_version=observation.registry_version,
++                base_fingerprint=observation.fingerprint, uncertain_write=key in self._dispatched_operations,
++                termination_reason="Recovery interrupted by internal execution/audit failure; no further write allowed")
++        if result.status != RecoveryStatus.RECOVERED and result.failed_recovery_duration_ms is None:
++            result.failed_recovery_duration_ms = round((time.perf_counter() - start) * 1000, 2)
++        if self.audit_store:
++            try:
++                records = await self.audit_store.get_run_repair_attempts(run_id)
++                fingerprint = result.proposal_fingerprint or f"fp_none_{result.tool_name}"
++                if not any(r.tool_name == result.tool_name and r.proposal_fingerprint == fingerprint for r in records):
++                    await self._audit_repair_attempt(run_id, result)
++            except Exception:
++                result.audit_incomplete = True
++        return result
++
++    async def _recover_failure(
+         self,
+         observation: FailureObservation,
+         original_arguments: Dict[str, Any],
+@@ -287,11 +327,7 @@ class RecoveryController:
+         # Calculate remaining time from deadline
+         timeout_budget: Optional[float] = None
+         if deadline is not None:
+-            # If deadline is given as a duration (e.g. 30.0) vs timestamp
+-            if deadline < 1000000000.0:
+-                timeout_budget = deadline
+-            else:
+-                timeout_budget = max(0.0, deadline - time.time())
++            timeout_budget = max(0.0, deadline)
+             if timeout_budget <= 0.0:
+                 return RecoveryResult(
+                     status=RecoveryStatus.TIMEOUT,
+@@ -307,7 +343,7 @@ class RecoveryController:
+         # 1. Eligibility Check
+         # ---------------------------------------------------------------------
+         op_key = operation_identity.key if operation_identity else f"{tool_name}:{base_fp}"
+-        if op_key in self._dispatched_operations:
++        if op_key in self._recovery_operations:
+             return RecoveryResult(
+                 status=RecoveryStatus.PLANNING_FAILED,
+                 recovered=False,
+@@ -399,11 +435,8 @@ class RecoveryController:
+         verif_data: Optional[Dict[str, Any]] = None
+ 
+         try:
+-            lock_coro = lock.acquire()
+-            if timeout_budget is not None:
+-                await asyncio.wait_for(lock_coro, timeout=timeout_budget)
+-            else:
+-                await lock_coro
++            # Keep task ownership intact on Python 3.11; outer timeout covers lock wait.
++            await lock.acquire()
+ 
+             try:
+                 # -------------------------------------------------------------
+@@ -438,6 +471,12 @@ class RecoveryController:
+                         duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
+                     )
+ 
++                if op_key in self._recovery_operations:
++                    return RecoveryResult(status=RecoveryStatus.PLANNING_FAILED, recovered=False,
++                        tool_name=tool_name, base_version=base_version, base_fingerprint=base_fp,
++                        termination_reason="Recovery already attempted for logical operation")
++                self._recovery_operations.add(op_key)
++
+                 # -------------------------------------------------------------
+                 # 4. Pure Deterministic Proposal Formulation (with bounded LLM fallback)
+                 # -------------------------------------------------------------
+@@ -664,6 +703,7 @@ class RecoveryController:
+ 
+                 exec_ctx = ExecutionContext(
+                     run_id=run_id,
++                    tool_call_id=operation_identity.tool_call_id,
+                     idempotency_key=operation_identity.idempotency_key,
+                     candidate_snapshot=candidate_tool,
+                 )
+@@ -675,6 +715,15 @@ class RecoveryController:
+                     candidate_snapshot=candidate_tool,
+                 )
+ 
++                if self.audit_store:
++                    await self.audit_store.record_tool_execution(run_id=run_id,
++                        tool_call_id=operation_identity.tool_call_id or operation_identity.key,
++                        tool_name=tool_name, tool_version=candidate_tool.version,
++                        fingerprint=candidate_tool.fingerprint, attempt_number=2, is_repaired=True,
++                        arguments=val_result.transformed_arguments, status="success" if executed_res.is_success else "failed",
++                        result=executed_res.outcome, failure=executed_res.failure.model_dump() if executed_res.failure else None,
++                        timing=executed_res.timing.model_dump(), operation_identity=operation_identity.key)
++
+                 if not executed_res.is_success:
+                     err_msg = executed_res.failure.message if executed_res.failure else "Repaired execution failed"
+                     failed_dur = round((time.perf_counter() - start_time) * 1000, 2)
+@@ -730,7 +779,7 @@ class RecoveryController:
+                     return res
+ 
+                 # HTTP write succeeded downstream! Record separate business outcome.
+-                business_effect_occurred = True
++                business_effect_occurred = False
+ 
+                 # -------------------------------------------------------------
+                 # 8. Independent Business Intent Verification
+@@ -754,7 +803,9 @@ class RecoveryController:
+                         base_fingerprint=active_fp,
+                         proposal_fingerprint=proposal_fp,
+                         candidate_id=staged_candidate_id,
+-                        business_effect_occurred=True,
++                        business_effect_occurred=False,
++                        write_accepted=True,
++                        uncertain_write=True,
+                         verification_succeeded=False,
+                         registry_committed=False,
+                         execution_result=executed_res,
+@@ -777,6 +828,7 @@ class RecoveryController:
+                     return res
+ 
+                 verification_succeeded = True
++                business_effect_occurred = is_write
+                 verif_end_time = time.perf_counter()
+                 recovery_duration_ms = round((verif_end_time - start_time) * 1000, 2)
+ 
+diff --git a/orchestrator/healing/validator.py b/orchestrator/healing/validator.py
+index 61aa50d..c2b333c 100644
+--- a/orchestrator/healing/validator.py
++++ b/orchestrator/healing/validator.py
+@@ -57,23 +57,15 @@ def _is_supported_natural_language_rename(text: str, source: str, target: str) -
+     if s_lower not in t_lower or tgt_lower not in t_lower:
+         return False
+ 
++    source_re = r"['\"]?" + re.escape(source) + r"['\"]?"
++    target_re = r"['\"]?" + re.escape(target) + r"['\"]?"
+     patterns = [
+-        r"renamed\s+(?:to|as)",
+-        r"was\s+renamed",
+-        r"rename\s+.*?to",
+-        r"deprecated.*?use",
+-        r"deprecated.*?expected",
+-        r"instead\s+of",
+-        r"use\s+.*?instead",
+-        r"replaced\s+by",
+-        r"replaces\s+",
+-        r"migrated\s+(?:to|as)",
+-        r"->",
++        source_re + r"\s+(?:was\s+)?(?:renamed|replaced|migrated)\s+(?:to|as|by)\s+" + target_re,
++        source_re + r"\s+is\s+deprecated[.,]?\s*(?:please\s+)?(?:use|expected)\s+" + target_re,
++        r"use\s+" + target_re + r"\s+instead\s+of\s+" + source_re,
++        source_re + r"\s*->\s*" + target_re,
+     ]
+-    for pat in patterns:
+-        if re.search(pat, t_lower):
+-            return True
+-    return False
++    return any(re.search(pattern, text, re.I) for pattern in patterns)
+ 
+ 
+ def _is_supported_natural_language_nest(text: str, source: str, target: str) -> bool:
+@@ -84,28 +76,9 @@ def _is_supported_natural_language_nest(text: str, source: str, target: str) ->
+     s_lower = source.lower()
+     tgt_lower = target.lower()
+ 
+-    parts = tgt_lower.split(".")
+-    target_parent = parts[0] if parts else ""
+-    target_leaf = parts[-1] if parts else ""
+-
+-    if s_lower not in t_lower:
+-        return False
+-    if tgt_lower not in t_lower and (target_parent not in t_lower or target_leaf not in t_lower):
+-        return False
+-
+-    nest_patterns = [
+-        r"nested\s+(?:under|inside|in)",
+-        r"moved\s+under",
+-        r"now\s+under",
+-        r"now\s+nested",
+-        r"sub-object",
+-        r"expected\s+object",
+-        r"enclosed\s+in",
+-    ]
+-    for pat in nest_patterns:
+-        if re.search(pat, t_lower):
+-            return True
+-    return False
++    source_re = r"['\"]?" + re.escape(source) + r"['\"]?"
++    target_re = r"['\"]?" + re.escape(target) + r"['\"]?"
++    return bool(re.search(source_re + r"\s+(?:is\s+now\s+)?(?:nested\s+(?:under|inside|in)|moved\s+under)\s+" + target_re, text, re.I))
+ 
+ 
+ def _resolve_evidence_path(observation: FailureObservation, path_str: str) -> Any:
+@@ -182,8 +155,7 @@ def _resolve_evidence_path(observation: FailureObservation, path_str: str) -> An
+         if h:
+             return h
+ 
+-    if in_list:
+-        return observation.validation_details or body or {}
++    return None
+ 
+ def _lookup_path(data: Any, path: str) -> Any:
+     """Safely traverses nested dictionaries using dot notation."""
+@@ -220,7 +192,7 @@ def _is_lossless_integer_conversion(val: Any) -> Tuple[bool, Optional[str]]:
+         return False, f"Float/decimal values ({val}) cannot be truncated to integer."
+ 
+     if isinstance(val, str):
+-        stripped = val.strip()
++        stripped = val
+         if not stripped:
+             return False, "Empty string cannot be converted to integer."
+ 
+@@ -304,6 +276,9 @@ def validate_repair_proposal(
+     prop_fp = proposal.evidence_references.get("proposal_fingerprint", "") if isinstance(proposal, RepairProposal) else proposal.proposal_fingerprint
+     proposal_base_fp = proposal.evidence_references.get("base_fingerprint", "") if isinstance(proposal, RepairProposal) else proposal.base_fingerprint
+ 
++    if proposal_base_fp and proposal_base_fp != base_fp:
++        rejection_reasons.append("Proposal base fingerprint does not match captured contract")
++
+     # Tool Name Match
+     if not (snapshot.name == observation.tool_name == active_tool.name == prop_tool):
+         reason = f"Tool identity mismatch: snapshot='{snapshot.name}', observation='{observation.tool_name}', registry='{active_tool.name}', proposal='{prop_tool}'"
+@@ -427,13 +402,14 @@ def validate_repair_proposal(
+                     lookup_t = _lookup_path(ev_val, op.source_path or "") or _lookup_path(ev_val, op.target_path or "")
+                     if lookup_t is None:
+                         lookup_t = ev_val.get(op.source_path) or ev_val.get(op.target_path or "")
+-                    if isinstance(lookup_t, str) and ("int" in lookup_t.lower() or "number" in lookup_t.lower() or "string" in lookup_t.lower()):
++                    expected_type = "integer" if op.conversion_policy in ("to_integer", "string_to_integer") else "string"
++                    if isinstance(lookup_t, str) and lookup_t.lower() == expected_type:
+                         has_type_ev = True
+                     elif isinstance(lookup_t, dict):
+                         for _, v in lookup_t.items():
+                             if isinstance(v, str) and ("int" in v.lower() or "number" in v.lower() or "string" in v.lower()):
+                                 has_type_ev = True
+-                elif isinstance(ev_val, str) and any(w in ev_val.lower() for w in ["integer", "int", "number", "string"]):
++                elif isinstance(ev_val, str) and re.search(re.escape(op.target_path or op.source_path) + r"[\"\']?\s+(?:must be of type|expects|as|is)\s+(?:integer|string)", ev_val, re.I):
+                     has_type_ev = True
+ 
+                 if not has_type_ev:
+@@ -516,7 +492,7 @@ def validate_repair_proposal(
+                                 for _, v in val_type.items():
+                                     if isinstance(v, str) and any(k in v.lower() for k in ("int", "number", "numeric")):
+                                         ev_indicates_numeric = True
+-                        elif isinstance(ev_val, str) and any(k in ev_val.lower() for k in ("integer", "int", "number", "numeric")):
++                        elif isinstance(ev_val, str) and re.search(re.escape(op.target_path or src_key) + r"[\"\']?\s+(?:must be of type|expects|as|is)\s+integer", ev_val, re.I):
+                             ev_indicates_numeric = True
+ 
+                         if not ev_indicates_numeric:
+@@ -534,8 +510,11 @@ def validate_repair_proposal(
+                                 transformed_args[src_key] = int(str(src_val).strip())
+                                 checks.append(SafetyCheckRecord(check_name=f"lossless_conversion:{src_key}", passed=True))
+                     elif policy in ("to_string", "integer_to_string"):
+-                        transformed_args[src_key] = str(src_val)
+-                        checks.append(SafetyCheckRecord(check_name=f"lossless_conversion:{src_key}", passed=True))
++                        if isinstance(src_val, bool) or not isinstance(src_val, int):
++                            rejection_reasons.append("Integer-to-string conversion requires an integer source, not boolean or arbitrary data")
++                        else:
++                            transformed_args[src_key] = str(src_val)
++                            checks.append(SafetyCheckRecord(check_name=f"lossless_conversion:{src_key}", passed=True))
+ 
+     # Verify original_arguments is completely untouched
+     if original_arguments is transformed_args:
+@@ -563,6 +542,9 @@ def validate_repair_proposal(
+                 else:
+                     checks.append(SafetyCheckRecord(check_name=f"credential_binding:{hdr_name}", passed=True))
+ 
++                if credential_resolver is None:
++                    rejection_reasons.append("Credential availability resolver is required")
++
+                 # Check local credential availability resolver if provided
+                 if credential_resolver is not None:
+                     is_available = credential_resolver(cred_ref)
+@@ -608,57 +590,12 @@ def validate_repair_proposal(
+     else:
+         checks.append(SafetyCheckRecord(check_name="preserve_response_mapping", passed=True))
+ 
+-    # Apply operations to candidate definition
+-    new_req_mapping = copy.deepcopy(candidate.request_mapping)
+-    body_mapping = new_req_mapping.setdefault("body", {})
+-
+-    destination_paths_assigned: Dict[str, str] = {}
+-
+-    for op in operations:
+-        if op.operation_type == RestrictedOperationType.SET_HEADER:
+-            if op.credential_reference:
+-                candidate.credential_reference = op.credential_reference
+-            candidate.headers[op.target_path] = (
+-                f"Bearer {{{op.credential_reference}}}"
+-                if "auth" in op.target_path.lower()
+-                else f"{{{op.credential_reference}}}"
+-            )
+-        elif op.operation_type == RestrictedOperationType.RENAME_ARGUMENT:
+-            if op.target_path in destination_paths_assigned:
+-                reason = f"Destination collision: '{op.target_path}' is mapped from multiple sources ('{destination_paths_assigned[op.target_path]}' and '{op.source_path}')."
+-                rejection_reasons.append(reason)
+-                checks.append(SafetyCheckRecord(check_name="no_path_collision", passed=False, reason=reason))
+-            destination_paths_assigned[op.target_path] = op.source_path
+-
+-            if isinstance(body_mapping, dict) and op.source_path in body_mapping:
+-                orig_val = body_mapping.pop(op.source_path)
+-                body_mapping[op.target_path] = orig_val
+-        elif op.operation_type == RestrictedOperationType.NEST_ARGUMENT:
+-            if op.target_path in destination_paths_assigned:
+-                reason = f"Destination collision: '{op.target_path}' is mapped from multiple sources ('{destination_paths_assigned[op.target_path]}' and '{op.source_path}')."
+-                rejection_reasons.append(reason)
+-                checks.append(SafetyCheckRecord(check_name="no_path_collision", passed=False, reason=reason))
+-            destination_paths_assigned[op.target_path] = op.source_path
+-
+-            if isinstance(body_mapping, dict) and op.source_path in body_mapping:
+-                orig_val = body_mapping.pop(op.source_path)
+-                parts = op.target_path.split(".")
+-                curr = body_mapping
+-                for part in parts[:-1]:
+-                    curr = curr.setdefault(part, {})
+-                curr[parts[-1]] = orig_val
+-        elif op.operation_type == RestrictedOperationType.CAST_TYPE:
+-            target_type = "integer" if "integer" in (op.conversion_policy or "").lower() else "string"
+-            if op.source_path and op.source_path in candidate.argument_schema.properties:
+-                prop = dict(candidate.argument_schema.properties[op.source_path])
+-                prop["type"] = target_type
+-                candidate.argument_schema.properties[op.source_path] = prop
+-            elif op.target_path and op.target_path in candidate.argument_schema.properties:
+-                prop = dict(candidate.argument_schema.properties[op.target_path])
+-                prop["type"] = target_type
+-                candidate.argument_schema.properties[op.target_path] = prop
+-
+-    candidate.request_mapping = new_req_mapping
++    from orchestrator.healing.contract_patch import derive_contract
++    try:
++        candidate, transformed_args = derive_contract(snapshot, operations, original_arguments)
++        candidate.status = "validated_not_committed"
++    except (ValueError, KeyError, TypeError) as exc:
++        rejection_reasons.append(f"Invalid contract transformation: {exc}")
+ 
+     # Local JSON Schema Validation of transformed arguments against candidate schema
+     try:
+@@ -674,7 +611,8 @@ def validate_repair_proposal(
+     if isinstance(proposal, PlanningResult) and proposal.candidate_preview:
+         preview = proposal.candidate_preview
+         if (
+-            preview.request_mapping != candidate.request_mapping
++            preview.compute_fingerprint() != candidate.compute_fingerprint()
++            or preview.request_mapping != candidate.request_mapping
+             or preview.headers != candidate.headers
+             or preview.argument_schema.model_dump() != candidate.argument_schema.model_dump()
+         ):
+diff --git a/orchestrator/metrics/tracker.py b/orchestrator/metrics/tracker.py
+index dc99bcb..60ac725 100644
+--- a/orchestrator/metrics/tracker.py
++++ b/orchestrator/metrics/tracker.py
+@@ -64,9 +64,10 @@ class MetricsTracker:
+         usages = await audit_store.get_run_model_usages(run_id)
+ 
+         # Tool execution counts
+-        tool_dispatch_count = len(tool_execs)
+-        original_dispatch_count = sum(1 for e in tool_execs if not e.is_repaired)
+-        repaired_dispatch_count = sum(1 for e in tool_execs if e.is_repaired)
++        dispatched = [e for e in tool_execs if not e.failure or e.failure.get("http_status", 0) != 0 or e.failure.get("uncertain_write")]
++        tool_dispatch_count = len(dispatched)
++        original_dispatch_count = sum(1 for e in dispatched if not e.is_repaired)
++        repaired_dispatch_count = sum(1 for e in dispatched if e.is_repaired)
+ 
+         # Repair attempt counts and timing
+         repair_attempts_count = len(repairs)
+@@ -99,7 +100,7 @@ class MetricsTracker:
+         diag_usages = [u for u in usages if u.purpose == "diagnosis"]
+ 
+         agent_breakdown = compute_usage_breakdown(agent_usages)
+-        diag_breakdown = compute_usage_breakdown(diag_usages)
++        diag_breakdown = compute_usage_breakdown(diag_usages) if diag_usages else ModelUsageBreakdown(input_tokens=0, output_tokens=0, total_tokens=0, is_complete=True, status="complete")
+         session_breakdown = combine_session_usage(agent_breakdown, diag_breakdown)
+ 
+         # Turns count
+@@ -169,7 +170,7 @@ class MetricsTracker:
+                 run_metrics_list.append(rm)
+ 
+         has_usages = any(
+-            isinstance(rm.session_token_usage.total_tokens, int) for rm in run_metrics_list
++            rm.agent_token_usage.status != "unavailable" or rm.diagnosis_token_usage.total_tokens != 0 for rm in run_metrics_list
+         )
+         token_usage_str = "measured" if has_usages else "unavailable"
+ 
+diff --git a/orchestrator/models/__init__.py b/orchestrator/models/__init__.py
+index f10ecd8..acc26bf 100644
+--- a/orchestrator/models/__init__.py
++++ b/orchestrator/models/__init__.py
+@@ -46,6 +46,7 @@ class RunEvent(BaseModel):
+ 
+ 
+ class ToolArgumentSchema(BaseModel):
++    model_config = ConfigDict(extra="allow")
+     type: str = "object"
+     properties: Dict[str, Any]
+     required: List[str] = Field(default_factory=list)
+@@ -121,7 +122,8 @@ class OperationIdentity(BaseModel):
+ 
+     @property
+     def key(self) -> str:
+-        return f"{self.tool_name}:{self.method.upper()}:{self.endpoint}"
++        identity = self.idempotency_key or self.tool_call_id or "unidentified"
++        return f"{self.run_id or 'unscoped'}:{identity}:{self.tool_name}:{self.method.upper()}:{self.endpoint}"
+ 
+ 
+ class TimingInfo(BaseModel):
+diff --git a/orchestrator/registry/service.py b/orchestrator/registry/service.py
+index 7cc7787..a925118 100644
+--- a/orchestrator/registry/service.py
++++ b/orchestrator/registry/service.py
+@@ -241,6 +241,12 @@ class VersionedToolRegistry:
+             if not isinstance(schema.required, list):
+                 raise InvalidCandidateError("Argument schema required fields must be a list")
+ 
++            import jsonschema
++            try:
++                jsonschema.Draft7Validator.check_schema(schema.model_dump())
++            except jsonschema.SchemaError as exc:
++                raise InvalidCandidateError("Invalid argument JSON Schema") from exc
++
+             # Internally derive monotonic version and canonical fingerprint
+             target_version = derive_next_version(active.version)
+             candidate_copy.version = target_version
+diff --git a/pyproject.toml b/pyproject.toml
+index f4141ad..38bfae6 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -25,6 +25,8 @@ dependencies = [
+ ]
+ 
+ [project.optional-dependencies]
++gemini = ["langchain-google-genai>=2.0"]
++openai = ["langchain-openai>=0.2"]
+ dev = [
+     "pytest>=8.0.0",
+     "pytest-asyncio>=0.23.0"
+@@ -34,3 +36,6 @@ dev = [
+ asyncio_mode = "auto"
+ testpaths = ["tests"]
+ pythonpath = ["."]
++
++[tool.setuptools.packages.find]
++include = ["orchestrator*", "mock_api*", "evaluation*"]
+diff --git a/tests/healing/test_audit_and_metrics.py b/tests/healing/test_audit_and_metrics.py
+index e4588a1..8e37fd8 100644
+--- a/tests/healing/test_audit_and_metrics.py
++++ b/tests/healing/test_audit_and_metrics.py
+@@ -88,7 +88,7 @@ async def test_audit_store_initialization_and_schema(audit_store: SQLiteAuditSto
+         assert "model_usages" in tables
+ 
+         cur = conn.execute("SELECT MAX(version) as v FROM schema_migrations;")
+-        assert cur.fetchone()["v"] == 1
++        assert cur.fetchone()["v"] == 2
+ 
+         # Test idempotency: re-initializing should not fail
+         await audit_store.initialize()
+diff --git a/tests/healing/test_baseline_agent.py b/tests/healing/test_baseline_agent.py
+index 046e557..b70ce49 100644
+--- a/tests/healing/test_baseline_agent.py
++++ b/tests/healing/test_baseline_agent.py
+@@ -223,7 +223,7 @@ async def test_baseline_rejects_unknown_and_invalid_tool_calls_without_http():
+     assert len(assign_calls) == 0  # Zero HTTP assignment calls made
+     assert len(result["tool_calls"]) == 2
+     assert result["tool_calls"][0]["status"] == "unknown_tool"
+-    assert result["tool_calls"][1]["status"] == "validation_error"
++    assert result["tool_calls"][1]["status"] == "intent_rejected"
+ 
+ 
+ @pytest.mark.asyncio
+@@ -327,7 +327,7 @@ async def test_repeated_write_intent_preserves_idempotency_identity():
+     )
+     call3 = AIMessage(content="Done.", tool_calls=[])
+ 
+-    fake_model = ScriptedChatModel(responses=[call1, call2, call3])
++    fake_model = ScriptedChatModel(responses=[AIMessage(content="", tool_calls=[{"name":"find_user","args":{"name":"Maya"},"id":"resolve"}]), call1, call2, call3])
+     agent = BaselineAgent(client=client, model=fake_model)
+ 
+     await agent.execute_workflow(run_id="test-idempotency-key")
+@@ -354,14 +354,14 @@ async def test_uncertain_writes_not_blindly_retried():
+     )
+     call2 = AIMessage(content="Assign failed.", tool_calls=[])
+ 
+-    fake_model = ScriptedChatModel(responses=[call1, call2])
++    fake_model = ScriptedChatModel(responses=[AIMessage(content="", tool_calls=[{"name":"find_user","args":{"name":"Maya"},"id":"resolve"}]), call1, call2])
+     agent = BaselineAgent(client=client, model=fake_model)
+ 
+     result = await agent.execute_workflow(run_id="test-uncertain-write")
+ 
+     assert result["success"] is False
+     assert len(assign_calls) == 1
+-    assign_rec = result["tool_calls"][0]
++    assign_rec = next(c for c in result["tool_calls"] if c["tool_name"] == "assign_ticket")
+     assert assign_rec["status"] == "http_error"
+     assert assign_rec["error"]["status_code"] == 500
+ 
+diff --git a/tests/healing/test_member2_review.py b/tests/healing/test_member2_review.py
+new file mode 100644
+index 0000000..5d1fa71
+--- /dev/null
++++ b/tests/healing/test_member2_review.py
+@@ -0,0 +1,198 @@
++"""Review regressions using Member 1's real ASGI API, not invented errors."""
++import asyncio
++import json
++import time
++import httpx
++import pytest
++from langchain_core.messages import AIMessage
++from mock_api.app import app as mock_app
++from mock_api.config import settings as mock_settings
++from orchestrator.client.mock_client import MockBusinessApiClient, MockAdminApiClient, redact_secrets
++from orchestrator.registry import VersionedToolRegistry
++from orchestrator.execution.tool_executor import ToolExecutor
++from orchestrator.execution.events import EventBroadcaster
++from orchestrator.models import ExecutionContext
++from orchestrator.healing.recovery import RecoveryController, RecoveryStatus
++from orchestrator.agents.healing import HealingAgent
++from orchestrator.agents.baseline import BaselineAgent
++from orchestrator.audit.store import SQLiteAuditStore
++
++
++@pytest.mark.parametrize('scenario', ['rename','type_change','nesting','required_header','combined'])
++async def test_actual_mock_api_recovery_and_contract_reuse(scenario):
++    transport = httpx.ASGITransport(app=mock_app)
++    admin = MockAdminApiClient(base_url='http://mock', transport=transport)
++    client = MockBusinessApiClient(base_url='http://mock', transport=transport,
++        credential_resolver=lambda ref: mock_settings.assignment_bearer_token if ref == 'secops_auth' else None)
++    try:
++        await admin.reset()
++        await admin.set_mutation(scenario, evidence_level='explicit_hint')
++        registry = VersionedToolRegistry.create_default()
++        executor = ToolExecutor(registry=registry, client=client)
++        original = {'ticket_id':81,'user_id':'123'}
++        failed = await executor.execute('assign_ticket', original, ExecutionContext(run_id='review',tool_call_id='assign',idempotency_key='review-1'))
++        controller = RecoveryController(registry, executor, event_broadcaster=EventBroadcaster(),
++            approved_header_credentials={'Authorization':'secops_auth'})
++        recovered = await controller.recover_failure(failed.observation, original, failed.operation_identity, 'review', deadline=2)
++        assert recovered.recovered, recovered.termination_reason
++        assert original == {'ticket_id':81,'user_id':'123'}
++        active = registry.get('assign_ticket')
++        if scenario == 'rename':
++            args = {'ticket_id':81,'assignee_id':'123'}
++            assert 'user_id' not in active.argument_schema.properties
++            assert 'assignee_id' in active.argument_schema.required
++        elif scenario in ('nesting','combined'):
++            args = {'ticket_id':81,'target':{'id':123 if scenario=='combined' else '123'}}
++            assert 'target' in active.argument_schema.required
++        elif scenario == 'type_change':
++            args = {'ticket_id':81,'user_id':123}
++        else:
++            args = original
++        second = await executor.execute('assign_ticket', args, ExecutionContext(run_id='review2', idempotency_key='review-2'))
++        assert second.is_success, second.failure
++        ticket = await executor.execute('get_ticket', {'ticket_id':81})
++        assert ticket.outcome['assignee_id']=='123'
++        assert len(ticket.outcome['history'])==2
++    finally:
++        await admin.reset()
++        await admin.aclose()
++        await client.aclose()
++
++
++class Model:
++    def __init__(self, messages):self.messages=list(messages)
++    def bind_tools(self, tools):self.tools=tools;return self
++    async def ainvoke(self, messages):return self.messages.pop(0)
++
++
++async def test_healing_never_accepts_wrong_assignee():
++    def handler(req):
++        if req.url.path=='/users':return httpx.Response(200,json=[{'id':'123','name':'Maya','email':'m@test'}])
++        return httpx.Response(200,json={'id':81,'status':'assigned','assignee_id':'999','history':[]})
++    client=MockBusinessApiClient(transport=httpx.MockTransport(handler))
++    model=Model([AIMessage(content='',tool_calls=[{'name':'find_user','args':{'name':'Maya'},'id':'find'}]), AIMessage(content='done')])
++    result=await HealingAgent(client=client,model=model).execute_workflow('review-wrong')
++    assert result['status']=='failed'
++    await client.aclose()
++
++
++async def test_real_baseline_with_audit_does_not_crash_on_usage(tmp_path):
++    transport=httpx.ASGITransport(app=mock_app)
++    admin=MockAdminApiClient(base_url='http://mock',transport=transport);await admin.reset()
++    client=MockBusinessApiClient(base_url='http://mock',transport=transport)
++    store=SQLiteAuditStore(str(tmp_path/'audit.sqlite3'));await store.initialize()
++    model=Model([AIMessage(content='',tool_calls=[{'name':'find_user','args':{'name':'Maya'},'id':'find'}],usage_metadata={'input_tokens':10,'output_tokens':2,'total_tokens':12}),AIMessage(content='done')])
++    result=await BaselineAgent(client=client,model=model,audit_store=store).execute_workflow('review-baseline')
++    assert result['termination_reason']=='verification_failed'
++    assert len(await store.get_run_model_usages('review-baseline'))==2
++    await admin.aclose();await client.aclose()
++
++
++async def test_healing_model_deadline_is_enforced():
++    class Slow(Model):
++        async def ainvoke(self,messages):await asyncio.sleep(.5);return AIMessage(content='done')
++    client=MockBusinessApiClient(transport=httpx.MockTransport(lambda req:httpx.Response(200,json={})))
++    start=time.perf_counter()
++    result=await HealingAgent(client=client,model=Slow([]),timeout_seconds=.01).execute_workflow('review-timeout')
++    assert time.perf_counter()-start<.2
++    assert result['status']=='failed'
++    assert result['termination_reason']=='deadline_exceeded'
++    await client.aclose()
++
++
++async def test_event_delivery_is_durable_and_usage_survives(tmp_path):
++    store=SQLiteAuditStore(str(tmp_path/'events.sqlite3'));await store.initialize()
++    await store.record_run_start('durable','healing','task')
++    broadcaster=EventBroadcaster(store);sub=broadcaster.register_subscriber('durable')
++    broadcaster.publish_event('durable','run_started','healing',data={'diagnosis_tokens':12,'message':'Bearer abc_secret_token'})
++    assert sub.queue.empty()
++    await broadcaster.flush('durable')
++    event=await sub.queue.get()
++    persisted=await store.get_run_events('durable')
++    assert persisted[0].sequence==event.sequence
++    assert persisted[0].data['diagnosis_tokens']==12
++    assert 'abc_secret_token' not in json.dumps(persisted[0].data)
++
++
++async def test_recovery_verifier_is_inside_deadline():
++    from tests.healing.test_recovery import _create_assign_observation
++    registry=VersionedToolRegistry.create_default()
++    client=MockBusinessApiClient(transport=httpx.MockTransport(lambda req:httpx.Response(200,json={'ticket_id':81,'assignee_id':'123','status':'assigned'})))
++    async def slow(**kw):await asyncio.sleep(.5);return {'verified':True}
++    ctrl=RecoveryController(registry,ToolExecutor(registry,client),verifier=slow,event_broadcaster=EventBroadcaster())
++    obs=_create_assign_observation();start=time.perf_counter()
++    result=await ctrl.recover_failure(obs,obs.original_arguments,obs.operation_identity,'deadline',deadline=.01)
++    assert result.status==RecoveryStatus.TIMEOUT
++    assert time.perf_counter()-start<.2
++    assert registry.get('assign_ticket').version=='1.0.0'
++    assert not any(c.status=='staged' for c in registry.list_staged())
++    await client.aclose()
++
++
++@pytest.mark.parametrize('agent_type',[BaselineAgent,HealingAgent])
++async def test_unresolved_or_wrong_intent_never_writes(agent_type):
++    calls=[]
++    def handler(req):
++        calls.append(req.method)
++        return httpx.Response(200,json={'id':81,'status':'assigned','assignee_id':'999','history':[]})
++    client=MockBusinessApiClient(transport=httpx.MockTransport(handler))
++    model=Model([AIMessage(content='',tool_calls=[{'name':'assign_ticket','args':{'ticket_id':81,'user_id':'999'},'id':'wrong'}]),AIMessage(content='done')])
++    result=await agent_type(client=client,model=model).execute_workflow('intent-'+agent_type.__name__)
++    assert 'POST' not in calls
++    assert result['status']=='failed'
++    await client.aclose()
++
++
++async def test_public_mutation_healing_audit_and_replay(tmp_path,monkeypatch):
++    from orchestrator.app import app
++    from orchestrator.execution.events import event_broadcaster
++    from orchestrator.execution.workflow import workflow_manager
++    import orchestrator.agents.healing as module
++    old_state={k:getattr(app.state,k) for k in ('mock_client','admin_client','audit_store','registry')}
++    old_store=event_broadcaster._audit_store
++    old_manager_store=workflow_manager.audit_store
++    transport=httpx.ASGITransport(app=mock_app)
++    business=MockBusinessApiClient(base_url='http://mock',transport=transport,
++        credential_resolver=lambda ref:mock_settings.assignment_bearer_token if ref=='secops_auth' else None)
++    admin=MockAdminApiClient(base_url='http://mock',transport=transport)
++    store=SQLiteAuditStore(str(tmp_path/'public.sqlite3'));await store.initialize()
++    app.state.mock_client=business;app.state.admin_client=admin;app.state.audit_store=store
++    app.state.registry=VersionedToolRegistry.create_default()
++    workflow_manager.reset();workflow_manager.set_audit_store(store)
++    event_broadcaster.set_audit_store(store)
++    model=Model([
++        AIMessage(content='',tool_calls=[{'name':'find_user','args':{'name':'Maya'},'id':'find'}],usage_metadata={'input_tokens':10,'output_tokens':2,'total_tokens':12}),
++        AIMessage(content='',tool_calls=[{'name':'assign_ticket','args':{'ticket_id':81,'user_id':'123'},'id':'assign'}]),
++        AIMessage(content='done')])
++    monkeypatch.setattr(module,'create_chat_model',lambda:model)
++    try:
++        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://orch') as c:
++            assert (await c.post('/demo/reset')).status_code==200
++            mutation=await c.post('/demo/mutation',json={'scenario':'combined','evidence_level':'explicit_hint'})
++            assert mutation.status_code==200,mutation.text
++            run=await c.post('/runs',json={'mode':'healing','wait':True})
++            assert run.status_code==200,run.text
++            record=run.json();assert record['status']=='completed',record
++            run_id=record['run_id']
++            persisted=await store.get_run(run_id);assert persisted.status=='completed'
++            repairs=await store.get_run_repair_attempts(run_id);assert len(repairs)==1 and repairs[0].registry_committed
++            events=await store.get_run_events(run_id)
++            assert [e.sequence for e in events]==list(range(1,len(events)+1))
++            assert all(e.event_type != 'pre_write_audit_authorized' for e in events)
++            replay=await c.get(f'/runs/{run_id}/events',headers={'Last-Event-ID':'2'})
++            ids=[int(line[4:]) for line in replay.text.splitlines() if line.startswith('id: ')]
++            assert ids==list(range(3,len(events)+1)), replay.text
++            assert (await c.get(f'/runs/{run_id}/events?cursor=1&last_event_id=2')).status_code==400
++            assert (await c.get('/patches')).json()['status']=='available'
++    finally:
++        await event_broadcaster.flush()
++        event_broadcaster.set_audit_store(old_store);workflow_manager.set_audit_store(old_manager_store)
++        for k,v in old_state.items():setattr(app.state,k,v)
++        await admin.reset();await business.aclose();await admin.aclose()
++
++
++def test_correspondence_is_directional_not_keyword_cooccurrence():
++    from orchestrator.healing.validator import _is_supported_natural_language_rename
++    assert not _is_supported_natural_language_rename('assignee_id was renamed to user_id','user_id','assignee_id')
++    assert not _is_supported_natural_language_rename('user_id and assignee_id exist. unrelated was renamed to other.','user_id','assignee_id')
++    assert _is_supported_natural_language_rename('user_id was renamed to assignee_id','user_id','assignee_id')
+diff --git a/tests/healing/test_recovery.py b/tests/healing/test_recovery.py
+index 042e7e0..e533d54 100644
+--- a/tests/healing/test_recovery.py
++++ b/tests/healing/test_recovery.py
+@@ -474,8 +474,8 @@ async def test_verification_mismatch_prevents_commit_and_records_truthful_outcom
+ 
+     assert res.status == RecoveryStatus.VERIFICATION_FAILED
+     assert res.recovered is False
+-    # Business write occurred downstream, but verification failed:
+-    assert res.business_effect_occurred is True
++    # A success response does not prove the intended effect; verification failed:
++    assert res.business_effect_occurred is False
+     assert res.verification_succeeded is False
+     assert res.registry_committed is False
+ 
+@@ -619,10 +619,8 @@ class FakeChatModel:
+         self.bound_tools = []
+ 
+     def bind_tools(self, tools: List[Dict[str, Any]]):
+-        new_model = FakeChatModel(self.turns_responses)
+-        new_model.bound_tools = tools
+-        new_model.call_count = self.call_count
+-        return new_model
++        self.bound_tools = tools
++        return self
+ 
+     async def ainvoke(self, messages: List[Any]) -> AIMessage:
+         if self.call_count < len(self.turns_responses):
+@@ -715,7 +713,7 @@ async def test_healing_agent_model_binding_refresh_and_second_run_reuse():
+     )
+     msg2_2 = AIMessage(
+         content="Assigning ticket 81 to Maya...",
+-        tool_calls=[ToolCall(name="assign_ticket", args={"ticket_id": 81, "user_id": "123"}, id="call-assign-002")],
++        tool_calls=[ToolCall(name="assign_ticket", args={"ticket_id": 81, "assignee_id": "123"}, id="call-assign-002")],
+     )
+     msg2_3 = AIMessage(
+         content="Confirming ticket assignment...",
+@@ -760,7 +758,7 @@ async def test_baseline_agent_remains_frozen():
+     )
+     msg2 = AIMessage(
+         content="Assign ticket",
+-        tool_calls=[ToolCall(name="assign_ticket", args={"ticket_id": 81, "user_id": "123"}, id="call-2")],
++        tool_calls=[ToolCall(name="assign_ticket", args={"ticket_id": 81, "assignee_id": "123"}, id="call-2")],
+     )
+     fake_model = FakeChatModel([msg1, msg2])
+ 
+diff --git a/tests/healing/test_repair_proposals.py b/tests/healing/test_repair_proposals.py
+index 77e3e54..a8e9ddc 100644
+--- a/tests/healing/test_repair_proposals.py
++++ b/tests/healing/test_repair_proposals.py
+@@ -155,7 +155,7 @@ def test_explicit_rename_proposal():
+     assert result.candidate_preview.status == "proposed_unvalidated"
+     body_map = result.candidate_preview.request_mapping["body"]
+     assert "assignee_id" in body_map
+-    assert body_map["assignee_id"] == "{user_id}"
++    assert body_map["assignee_id"] == "{assignee_id}"
+     assert "user_id" not in body_map
+     assert body_map["ticket_id"] == "{ticket_id}"
+ 
+@@ -193,7 +193,7 @@ def test_explicit_nesting_proposal():
+     assert result.candidate_preview is not None
+     body_map = result.candidate_preview.request_mapping["body"]
+     assert "target" in body_map
+-    assert body_map["target"]["id"] == "{user_id}"
++    assert body_map["target"]["id"] == "{target.id}"
+     assert "user_id" not in body_map
+     assert body_map["ticket_id"] == "{ticket_id}"
+ 
+@@ -302,7 +302,7 @@ def test_complete_combined_proposal_with_unrelated_field_preservation():
+     assert preview is not None
+     assert preview.credential_reference == "secops_auth"
+     assert "Authorization" in preview.headers
+-    assert preview.request_mapping["body"]["target"]["id"] == "{user_id}"
++    assert preview.request_mapping["body"]["target"]["id"] == "{target.id}"
+ 
+     # Unrelated fields strictly preserved
+     assert preview.endpoint == "/tickets/assign"
+@@ -433,7 +433,7 @@ def test_distinct_source_wire_and_schema_paths():
+     # Wire target path is nested
+     assert op.target_path == "target.id"
+     # Mapping expansion uses template placeholder of the source argument
+-    assert result.candidate_preview.request_mapping["body"]["target"]["id"] == "{user_id}"
++    assert result.candidate_preview.request_mapping["body"]["target"]["id"] == "{target.id}"
+ 
+ 
+ # =========================================================================
+diff --git a/tests/healing/test_safety_validator.py b/tests/healing/test_safety_validator.py
+index 97febcb..447825f 100644
+--- a/tests/healing/test_safety_validator.py
++++ b/tests/healing/test_safety_validator.py
+@@ -176,11 +176,11 @@ def test_valid_rename_validation_accepted():
+     assert val_res.authorized_for_recovery is True
+     assert val_res.candidate is not None
+     assert val_res.candidate.status == "validated_not_committed"
+-    assert val_res.candidate.request_mapping["body"]["assignee_id"] == "{user_id}"
++    assert val_res.candidate.request_mapping["body"]["assignee_id"] == "{assignee_id}"
+     assert "user_id" not in val_res.candidate.request_mapping["body"]
+     assert val_res.candidate.endpoint == tool.endpoint
+     assert val_res.candidate.method == tool.method
+-    assert val_res.transformed_arguments == orig_args
++    assert val_res.transformed_arguments == {"ticket_id": 81, "assignee_id": "123"}
+     assert val_res.proposal_fingerprint == plan_res.proposal_fingerprint
+     assert val_res.candidate_fingerprint is not None
+ 
+@@ -212,7 +212,7 @@ def test_valid_nesting_validation_accepted():
+     )
+ 
+     assert val_res.status == ValidationStatus.ACCEPTED
+-    assert val_res.candidate.request_mapping["body"]["target"]["id"] == "{user_id}"
++    assert val_res.candidate.request_mapping["body"]["target"]["id"] == "{target.id}"
+     assert val_res.authorized_for_recovery is True
+ 
+ 
+diff --git a/tests/healing/test_stubs.py b/tests/healing/test_stubs.py
+index e950946..41e6ee9 100644
+--- a/tests/healing/test_stubs.py
++++ b/tests/healing/test_stubs.py
+@@ -22,7 +22,7 @@ async def test_orchestrator_registry_and_metrics():
+         # Check patches endpoint returns explicit pending state
+         patches_res = await client.get("/patches")
+         assert patches_res.status_code == 200
+-        assert patches_res.json()["status"] == "pending_member_2"
++        assert patches_res.json()["status"] == "available"
+ 
+         # Check metrics endpoint returns honest counts
+         metrics_res = await client.get("/metrics")

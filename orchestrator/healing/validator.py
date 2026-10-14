@@ -57,23 +57,15 @@ def _is_supported_natural_language_rename(text: str, source: str, target: str) -
     if s_lower not in t_lower or tgt_lower not in t_lower:
         return False
 
+    source_re = r"['\"]?" + re.escape(source) + r"['\"]?"
+    target_re = r"['\"]?" + re.escape(target) + r"['\"]?"
     patterns = [
-        r"renamed\s+(?:to|as)",
-        r"was\s+renamed",
-        r"rename\s+.*?to",
-        r"deprecated.*?use",
-        r"deprecated.*?expected",
-        r"instead\s+of",
-        r"use\s+.*?instead",
-        r"replaced\s+by",
-        r"replaces\s+",
-        r"migrated\s+(?:to|as)",
-        r"->",
+        source_re + r"\s+(?:was\s+)?(?:renamed|replaced|migrated)\s+(?:to|as|by)\s+" + target_re,
+        source_re + r"\s+is\s+deprecated[.,]?\s*(?:please\s+)?(?:use|expected)\s+" + target_re,
+        r"use\s+" + target_re + r"\s+instead\s+of\s+" + source_re,
+        source_re + r"\s*->\s*" + target_re,
     ]
-    for pat in patterns:
-        if re.search(pat, t_lower):
-            return True
-    return False
+    return any(re.search(pattern, text, re.I) for pattern in patterns)
 
 
 def _is_supported_natural_language_nest(text: str, source: str, target: str) -> bool:
@@ -84,28 +76,9 @@ def _is_supported_natural_language_nest(text: str, source: str, target: str) -> 
     s_lower = source.lower()
     tgt_lower = target.lower()
 
-    parts = tgt_lower.split(".")
-    target_parent = parts[0] if parts else ""
-    target_leaf = parts[-1] if parts else ""
-
-    if s_lower not in t_lower:
-        return False
-    if tgt_lower not in t_lower and (target_parent not in t_lower or target_leaf not in t_lower):
-        return False
-
-    nest_patterns = [
-        r"nested\s+(?:under|inside|in)",
-        r"moved\s+under",
-        r"now\s+under",
-        r"now\s+nested",
-        r"sub-object",
-        r"expected\s+object",
-        r"enclosed\s+in",
-    ]
-    for pat in nest_patterns:
-        if re.search(pat, t_lower):
-            return True
-    return False
+    source_re = r"['\"]?" + re.escape(source) + r"['\"]?"
+    target_re = r"['\"]?" + re.escape(target) + r"['\"]?"
+    return bool(re.search(source_re + r"\s+(?:is\s+now\s+)?(?:nested\s+(?:under|inside|in)|moved\s+under)\s+" + target_re, text, re.I))
 
 
 def _resolve_evidence_path(observation: FailureObservation, path_str: str) -> Any:
@@ -182,8 +155,7 @@ def _resolve_evidence_path(observation: FailureObservation, path_str: str) -> An
         if h:
             return h
 
-    if in_list:
-        return observation.validation_details or body or {}
+    return None
 
 def _lookup_path(data: Any, path: str) -> Any:
     """Safely traverses nested dictionaries using dot notation."""
@@ -220,7 +192,7 @@ def _is_lossless_integer_conversion(val: Any) -> Tuple[bool, Optional[str]]:
         return False, f"Float/decimal values ({val}) cannot be truncated to integer."
 
     if isinstance(val, str):
-        stripped = val.strip()
+        stripped = val
         if not stripped:
             return False, "Empty string cannot be converted to integer."
 
@@ -303,6 +275,9 @@ def validate_repair_proposal(
     prop_version = proposal.base_version
     prop_fp = proposal.evidence_references.get("proposal_fingerprint", "") if isinstance(proposal, RepairProposal) else proposal.proposal_fingerprint
     proposal_base_fp = proposal.evidence_references.get("base_fingerprint", "") if isinstance(proposal, RepairProposal) else proposal.base_fingerprint
+
+    if proposal_base_fp and proposal_base_fp != base_fp:
+        rejection_reasons.append("Proposal base fingerprint does not match captured contract")
 
     # Tool Name Match
     if not (snapshot.name == observation.tool_name == active_tool.name == prop_tool):
@@ -427,13 +402,14 @@ def validate_repair_proposal(
                     lookup_t = _lookup_path(ev_val, op.source_path or "") or _lookup_path(ev_val, op.target_path or "")
                     if lookup_t is None:
                         lookup_t = ev_val.get(op.source_path) or ev_val.get(op.target_path or "")
-                    if isinstance(lookup_t, str) and ("int" in lookup_t.lower() or "number" in lookup_t.lower() or "string" in lookup_t.lower()):
+                    expected_type = "integer" if op.conversion_policy in ("to_integer", "string_to_integer") else "string"
+                    if isinstance(lookup_t, str) and lookup_t.lower() == expected_type:
                         has_type_ev = True
                     elif isinstance(lookup_t, dict):
                         for _, v in lookup_t.items():
                             if isinstance(v, str) and ("int" in v.lower() or "number" in v.lower() or "string" in v.lower()):
                                 has_type_ev = True
-                elif isinstance(ev_val, str) and any(w in ev_val.lower() for w in ["integer", "int", "number", "string"]):
+                elif isinstance(ev_val, str) and re.search(re.escape(op.target_path or op.source_path) + r"[\"\']?\s+(?:must be of type|expects|as|is)\s+(?:integer|string)", ev_val, re.I):
                     has_type_ev = True
 
                 if not has_type_ev:
@@ -516,7 +492,7 @@ def validate_repair_proposal(
                                 for _, v in val_type.items():
                                     if isinstance(v, str) and any(k in v.lower() for k in ("int", "number", "numeric")):
                                         ev_indicates_numeric = True
-                        elif isinstance(ev_val, str) and any(k in ev_val.lower() for k in ("integer", "int", "number", "numeric")):
+                        elif isinstance(ev_val, str) and re.search(re.escape(op.target_path or src_key) + r"[\"\']?\s+(?:must be of type|expects|as|is)\s+integer", ev_val, re.I):
                             ev_indicates_numeric = True
 
                         if not ev_indicates_numeric:
@@ -534,8 +510,11 @@ def validate_repair_proposal(
                                 transformed_args[src_key] = int(str(src_val).strip())
                                 checks.append(SafetyCheckRecord(check_name=f"lossless_conversion:{src_key}", passed=True))
                     elif policy in ("to_string", "integer_to_string"):
-                        transformed_args[src_key] = str(src_val)
-                        checks.append(SafetyCheckRecord(check_name=f"lossless_conversion:{src_key}", passed=True))
+                        if isinstance(src_val, bool) or not isinstance(src_val, int):
+                            rejection_reasons.append("Integer-to-string conversion requires an integer source, not boolean or arbitrary data")
+                        else:
+                            transformed_args[src_key] = str(src_val)
+                            checks.append(SafetyCheckRecord(check_name=f"lossless_conversion:{src_key}", passed=True))
 
     # Verify original_arguments is completely untouched
     if original_arguments is transformed_args:
@@ -562,6 +541,9 @@ def validate_repair_proposal(
                     checks.append(SafetyCheckRecord(check_name=f"credential_binding:{hdr_name}", passed=False, reason=reason))
                 else:
                     checks.append(SafetyCheckRecord(check_name=f"credential_binding:{hdr_name}", passed=True))
+
+                if credential_resolver is None:
+                    rejection_reasons.append("Credential availability resolver is required")
 
                 # Check local credential availability resolver if provided
                 if credential_resolver is not None:
@@ -608,57 +590,12 @@ def validate_repair_proposal(
     else:
         checks.append(SafetyCheckRecord(check_name="preserve_response_mapping", passed=True))
 
-    # Apply operations to candidate definition
-    new_req_mapping = copy.deepcopy(candidate.request_mapping)
-    body_mapping = new_req_mapping.setdefault("body", {})
-
-    destination_paths_assigned: Dict[str, str] = {}
-
-    for op in operations:
-        if op.operation_type == RestrictedOperationType.SET_HEADER:
-            if op.credential_reference:
-                candidate.credential_reference = op.credential_reference
-            candidate.headers[op.target_path] = (
-                f"Bearer {{{op.credential_reference}}}"
-                if "auth" in op.target_path.lower()
-                else f"{{{op.credential_reference}}}"
-            )
-        elif op.operation_type == RestrictedOperationType.RENAME_ARGUMENT:
-            if op.target_path in destination_paths_assigned:
-                reason = f"Destination collision: '{op.target_path}' is mapped from multiple sources ('{destination_paths_assigned[op.target_path]}' and '{op.source_path}')."
-                rejection_reasons.append(reason)
-                checks.append(SafetyCheckRecord(check_name="no_path_collision", passed=False, reason=reason))
-            destination_paths_assigned[op.target_path] = op.source_path
-
-            if isinstance(body_mapping, dict) and op.source_path in body_mapping:
-                orig_val = body_mapping.pop(op.source_path)
-                body_mapping[op.target_path] = orig_val
-        elif op.operation_type == RestrictedOperationType.NEST_ARGUMENT:
-            if op.target_path in destination_paths_assigned:
-                reason = f"Destination collision: '{op.target_path}' is mapped from multiple sources ('{destination_paths_assigned[op.target_path]}' and '{op.source_path}')."
-                rejection_reasons.append(reason)
-                checks.append(SafetyCheckRecord(check_name="no_path_collision", passed=False, reason=reason))
-            destination_paths_assigned[op.target_path] = op.source_path
-
-            if isinstance(body_mapping, dict) and op.source_path in body_mapping:
-                orig_val = body_mapping.pop(op.source_path)
-                parts = op.target_path.split(".")
-                curr = body_mapping
-                for part in parts[:-1]:
-                    curr = curr.setdefault(part, {})
-                curr[parts[-1]] = orig_val
-        elif op.operation_type == RestrictedOperationType.CAST_TYPE:
-            target_type = "integer" if "integer" in (op.conversion_policy or "").lower() else "string"
-            if op.source_path and op.source_path in candidate.argument_schema.properties:
-                prop = dict(candidate.argument_schema.properties[op.source_path])
-                prop["type"] = target_type
-                candidate.argument_schema.properties[op.source_path] = prop
-            elif op.target_path and op.target_path in candidate.argument_schema.properties:
-                prop = dict(candidate.argument_schema.properties[op.target_path])
-                prop["type"] = target_type
-                candidate.argument_schema.properties[op.target_path] = prop
-
-    candidate.request_mapping = new_req_mapping
+    from orchestrator.healing.contract_patch import derive_contract
+    try:
+        candidate, transformed_args = derive_contract(snapshot, operations, original_arguments)
+        candidate.status = "validated_not_committed"
+    except (ValueError, KeyError, TypeError) as exc:
+        rejection_reasons.append(f"Invalid contract transformation: {exc}")
 
     # Local JSON Schema Validation of transformed arguments against candidate schema
     try:
@@ -674,7 +611,8 @@ def validate_repair_proposal(
     if isinstance(proposal, PlanningResult) and proposal.candidate_preview:
         preview = proposal.candidate_preview
         if (
-            preview.request_mapping != candidate.request_mapping
+            preview.compute_fingerprint() != candidate.compute_fingerprint()
+            or preview.request_mapping != candidate.request_mapping
             or preview.headers != candidate.headers
             or preview.argument_schema.model_dump() != candidate.argument_schema.model_dump()
         ):

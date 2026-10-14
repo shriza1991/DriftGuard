@@ -25,6 +25,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+gemini = ["langchain-google-genai>=2.0"]
+openai = ["langchain-openai>=0.2"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0"
@@ -34,3 +36,6 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["orchestrator*", "mock_api*", "evaluation*"]

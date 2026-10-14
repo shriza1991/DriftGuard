@@ -474,8 +474,8 @@ async def test_verification_mismatch_prevents_commit_and_records_truthful_outcom
 
     assert res.status == RecoveryStatus.VERIFICATION_FAILED
     assert res.recovered is False
-    # Business write occurred downstream, but verification failed:
-    assert res.business_effect_occurred is True
+    # A success response does not prove the intended effect; verification failed:
+    assert res.business_effect_occurred is False
     assert res.verification_succeeded is False
     assert res.registry_committed is False
 
@@ -619,10 +619,8 @@ class FakeChatModel:
         self.bound_tools = []
 
     def bind_tools(self, tools: List[Dict[str, Any]]):
-        new_model = FakeChatModel(self.turns_responses)
-        new_model.bound_tools = tools
-        new_model.call_count = self.call_count
-        return new_model
+        self.bound_tools = tools
+        return self
 
     async def ainvoke(self, messages: List[Any]) -> AIMessage:
         if self.call_count < len(self.turns_responses):
@@ -715,7 +713,7 @@ async def test_healing_agent_model_binding_refresh_and_second_run_reuse():
     )
     msg2_2 = AIMessage(
         content="Assigning ticket 81 to Maya...",
-        tool_calls=[ToolCall(name="assign_ticket", args={"ticket_id": 81, "user_id": "123"}, id="call-assign-002")],
+        tool_calls=[ToolCall(name="assign_ticket", args={"ticket_id": 81, "assignee_id": "123"}, id="call-assign-002")],
     )
     msg2_3 = AIMessage(
         content="Confirming ticket assignment...",
@@ -760,7 +758,7 @@ async def test_baseline_agent_remains_frozen():
     )
     msg2 = AIMessage(
         content="Assign ticket",
-        tool_calls=[ToolCall(name="assign_ticket", args={"ticket_id": 81, "user_id": "123"}, id="call-2")],
+        tool_calls=[ToolCall(name="assign_ticket", args={"ticket_id": 81, "assignee_id": "123"}, id="call-2")],
     )
     fake_model = FakeChatModel([msg1, msg2])
 

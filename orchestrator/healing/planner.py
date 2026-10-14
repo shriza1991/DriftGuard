@@ -135,6 +135,10 @@ def plan_repair(
         "hint": hint_text,
     }
 
+    prefix = "response_evidence.body.error" if isinstance(body_dict.get("error"), dict) else "response_evidence.body"
+    detail_prefix = prefix + ".details"
+    migration_evidence_path = detail_prefix + ".migration_mapping" if isinstance(details.get("migration_mapping"), dict) else prefix + ".hint"
+    type_evidence_path = detail_prefix + (".expected_types" if details.get("expected_types") else ".expected_schema")
     operations: List[PlannedOperation] = []
     missing_requirements: List[str] = []
     refusal_reasons: List[str] = []
@@ -166,7 +170,7 @@ def plan_repair(
                     target_path=req_hdr,
                     credential_reference=cred_ref,
                     value_provenance=f"approved_credential_reference:{cred_ref}",
-                    evidence_path="response_evidence.body.error.details.required_headers",
+                    evidence_path=detail_prefix + ".required_headers",
                     evidence_summary=f"Downstream service returned explicit requirement for header '{req_hdr}', mapped via approved credential reference '{cred_ref}'.",
                 )
             )
@@ -287,7 +291,7 @@ def plan_repair(
                     source_path=src_field,
                     target_path=tgt_path,
                     value_provenance=f"caller_argument:{src_field}",
-                    evidence_path="response_evidence.body.error.details.migration_hint",
+                    evidence_path=migration_evidence_path,
                     evidence_summary=f"Evidenced migration maps argument '{src_field}' into nested wire path '{tgt_path}'.",
                 )
             )
@@ -299,7 +303,7 @@ def plan_repair(
                     source_path=src_field,
                     target_path=tgt_path,
                     value_provenance=f"caller_argument:{src_field}",
-                    evidence_path="response_evidence.body.error.details.migration_hint",
+                    evidence_path=migration_evidence_path,
                     evidence_summary=f"Evidenced migration renames wire parameter '{src_field}' to '{tgt_path}'.",
                 )
             )
@@ -357,7 +361,7 @@ def plan_repair(
                         target_path=tgt_path,
                         conversion_policy=policy,
                         value_provenance=f"caller_argument:{src_field}",
-                        evidence_path="response_evidence.body.error.details.expected_schema",
+                        evidence_path=type_evidence_path,
                         evidence_summary=f"Evidenced expected schema requires '{tgt_path}' to be '{exp_type}', currently '{curr_type}'.",
                     )
                 )
@@ -449,39 +453,14 @@ def plan_repair(
     preview = copy.deepcopy(snapshot)
     preview.status = "proposed_unvalidated"
 
-    # Apply operations to preview's request_mapping
-    new_req_mapping = copy.deepcopy(preview.request_mapping)
-    body_mapping = new_req_mapping.setdefault("body", {})
-
-    for op in sorted_ops:
-        if op.operation_type == RestrictedOperationType.SET_HEADER:
-            if op.credential_reference:
-                preview.credential_reference = op.credential_reference
-            preview.headers[op.target_path] = f"Bearer {{{op.credential_reference}}}" if "auth" in op.target_path.lower() else f"{{{op.credential_reference}}}"
-        elif op.operation_type == RestrictedOperationType.RENAME_ARGUMENT:
-            if isinstance(body_mapping, dict) and op.source_path in body_mapping:
-                orig_val = body_mapping.pop(op.source_path)
-                body_mapping[op.target_path] = orig_val
-        elif op.operation_type == RestrictedOperationType.NEST_ARGUMENT:
-            if isinstance(body_mapping, dict) and op.source_path in body_mapping:
-                orig_val = body_mapping.pop(op.source_path)
-                parts = op.target_path.split(".")
-                curr = body_mapping
-                for part in parts[:-1]:
-                    curr = curr.setdefault(part, {})
-                curr[parts[-1]] = orig_val
-        elif op.operation_type == RestrictedOperationType.CAST_TYPE:
-            target_type = "integer" if "integer" in (op.conversion_policy or "").lower() else "string"
-            if op.source_path and op.source_path in preview.argument_schema.properties:
-                prop = dict(preview.argument_schema.properties[op.source_path])
-                prop["type"] = target_type
-                preview.argument_schema.properties[op.source_path] = prop
-            elif op.target_path and op.target_path in preview.argument_schema.properties:
-                prop = dict(preview.argument_schema.properties[op.target_path])
-                prop["type"] = target_type
-                preview.argument_schema.properties[op.target_path] = prop
-
-    preview.request_mapping = new_req_mapping
+    from orchestrator.healing.contract_patch import derive_contract
+    try:
+        preview, _ = derive_contract(snapshot, sorted_ops)
+        preview.status = "proposed_unvalidated"
+    except (ValueError, KeyError, TypeError) as exc:
+        return PlanningResult(status=PlanningStatus.UNSUPPORTED, tool_name=snapshot.name,
+            base_version=snapshot.version, base_fingerprint=base_fingerprint,
+            reasons=[str(exc)], is_eligible=True, retry_safety=classification.retry_safety)
 
     # -------------------------------------------------------------------------
     # 10. Construct RepairProposal

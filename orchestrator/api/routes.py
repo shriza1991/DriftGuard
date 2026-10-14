@@ -35,7 +35,7 @@ ALLOWED_SCENARIOS = {
     "ambiguous_mapping",
 }
 
-ALLOWED_EVIDENCE_LEVELS = {"ordinary", "minimal", "rich"}
+ALLOWED_EVIDENCE_LEVELS = {"ordinary", "explicit_hint"}
 
 VALID_MODES = {"normal", "healing", "baseline"}
 VALID_EXECUTION_TYPES = {None, "deterministic", "model_driven_baseline", "model_driven_healing"}
@@ -70,6 +70,7 @@ class RunSummaryResponse(BaseModel):
     model_usage: Optional[Dict[str, Any]] = None
     termination_reason: Optional[str] = None
     execution_type: Optional[str] = None
+    audit_status: str = "complete"
 
 
 class AdminMutationRequest(BaseModel):
@@ -120,7 +121,7 @@ async def create_run(request: CreateRunRequest, req: Request):
 
     effective_exec_type = request.execution_type
     if effective_exec_type is None:
-        effective_exec_type = "model_driven_baseline" if request.mode == "baseline" else "deterministic"
+        effective_exec_type = {"baseline": "model_driven_baseline", "healing": "model_driven_healing", "normal": "deterministic"}[request.mode]
 
     # 2. Gate Admission
     gate: AppAdmissionGate = getattr(req.app.state, "admission_gate", None) or admission_gate
@@ -155,8 +156,10 @@ async def create_run(request: CreateRunRequest, req: Request):
                 execution_type=effective_exec_type,
                 created_at=now_iso,
             )
-        except Exception:
-            pass
+        except BaseException:
+            workflow_manager._runs_store.pop(run_id, None)
+            await gate.release_run(run_id)
+            raise
 
     # 4. Managed Background Task Definition
     app_registry = getattr(req.app.state, "registry", None)
@@ -172,6 +175,7 @@ async def create_run(request: CreateRunRequest, req: Request):
                     task=request.task,
                     client=app_client,
                 )
+                result["mode"] = request.mode
                 workflow_manager._runs_store[run_id] = result
             elif effective_exec_type == "model_driven_healing":
                 from orchestrator.agents.healing import HealingAgent
@@ -181,6 +185,7 @@ async def create_run(request: CreateRunRequest, req: Request):
                     task=request.task,
                     client=app_client,
                 )
+                result["mode"] = request.mode
                 workflow_manager._runs_store[run_id] = result
             else:
                 if audit_store:
@@ -192,6 +197,7 @@ async def create_run(request: CreateRunRequest, req: Request):
                     registry=app_registry,
                     client=app_client,
                 )
+                result["mode"] = request.mode
                 workflow_manager._runs_store[run_id] = result
         except asyncio.CancelledError:
             completed_iso = datetime.now(timezone.utc).isoformat()
@@ -225,7 +231,8 @@ async def create_run(request: CreateRunRequest, req: Request):
             raise
         except Exception as exc:
             completed_iso = datetime.now(timezone.utc).isoformat()
-            err_msg = f"Unexpected execution failure: {str(exc)}"
+            from orchestrator.client.mock_client import redact_secrets
+            err_msg = redact_secrets(f"Unexpected execution failure: {str(exc)}")
             failed_record = {
                 "run_id": run_id,
                 "status": "failed",
@@ -260,14 +267,26 @@ async def create_run(request: CreateRunRequest, req: Request):
                 except Exception:
                     pass
         finally:
-            await gate.release_run(run_id)
+            try:
+                record = workflow_manager.get_run(run_id)
+                if audit_store and record and record.get("status") != "running":
+                    await audit_store.record_run_completed(run_id=run_id, status=record["status"], duration_ms=record.get("duration_ms"), verified_outcome=record.get("outcome"), error=record.get("error"), termination_reason=record.get("termination_reason"), completed_at=record.get("completed_at"))
+                try:
+                    await event_broadcaster.flush(run_id)
+                except Exception:
+                    if record:
+                        record["audit_status"] = "incomplete"
+                    if audit_store:
+                        await audit_store.mark_audit_incomplete(run_id)
+            finally:
+                await gate.release_run(run_id)
 
     # 5. Spawn Task in AppTaskManager
     task_manager: AppTaskManager = getattr(req.app.state, "task_manager", None) or app_task_manager
     run_task = task_manager.spawn_run_task(run_id, _execute_workflow_task())
 
     if request.wait:
-        await run_task
+        await asyncio.shield(run_task)
         final_record = workflow_manager.get_run(run_id) or initial_record
         return RunSummaryResponse(**final_record)
     else:
@@ -297,6 +316,7 @@ async def get_run_status(run_id: str, req: Request):
                 error=persisted.error,
                 termination_reason=persisted.termination_reason,
                 execution_type=persisted.execution_type,
+                audit_status=persisted.audit_status,
             )
 
     raise HTTPException(
@@ -376,6 +396,13 @@ async def get_run_events_stream(
             detail=f"Conflicting Last-Event-ID header ({header_val}) and query cursor ({query_val})"
         )
 
+    if cursor is not None and last_event_id not in (None, ""):
+        try:
+            if int(last_event_id) != cursor:
+                raise ValueError()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Conflicting query cursors")
+
     effective_cursor = header_val if header_val is not None else (query_val if query_val is not None else 0)
 
     # 3. Stream Generator
@@ -389,6 +416,7 @@ async def get_run_events_stream(
             historical_events: List[RunEvent] = []
             if audit_store:
                 try:
+                    await event_broadcaster.flush(run_id)
                     db_events = await audit_store.get_run_events(run_id)
                     historical_events = [
                         RunEvent(
@@ -403,7 +431,10 @@ async def get_run_events_stream(
                         for pe in db_events
                     ]
                 except Exception:
-                    historical_events = event_broadcaster.get_events(run_id)
+                    import logging
+                    logging.getLogger(__name__).exception("Durable replay unavailable")
+                    yield 'event: error\ndata: {"error":"audit_unavailable","message":"Durable replay unavailable"}\n\n'
+                    return
             else:
                 historical_events = event_broadcaster.get_events(run_id)
 
@@ -424,6 +455,7 @@ async def get_run_events_stream(
                     current_status = prun.status
 
             if current_status in ("completed", "failed", "interrupted"):
+                await event_broadcaster.flush(run_id)
                 # Drain any remaining events in subscriber queue
                 while not subscriber.queue.empty():
                     ev = subscriber.queue.get_nowait()
@@ -465,6 +497,9 @@ async def get_run_events_stream(
                         if event.type in ("run_completed", "run_failed", "run_interrupted"):
                             break
                 except asyncio.TimeoutError:
+                    state = workflow_manager.get_run(run_id)
+                    if state and state.get("status") in ("completed", "failed", "interrupted"):
+                        break
                     # Keepalive idle heartbeat comment (not parsed as an event)
                     yield ": ping\n\n"
 
@@ -508,10 +543,10 @@ async def get_patches(req: Request, limit: int = 50, offset: int = 0):
         records = await audit_store.get_all_repair_attempts(limit=limit, offset=offset)
         repair_history = [r.model_dump() for r in records]
 
-    patches = healing_engine.get_patches()
+    patches = [r for r in repair_history if r.get("registry_committed")]
     return {
-        "status": "pending_member_2",
-        "notice": "Autonomous patch history retrieved from SQLite audit store." if repair_history else "Autonomous patch registry is pending Member 2 implementation.",
+        "status": "available",
+        "notice": "Persisted repair history; archived definitions are not active registry state.",
         "active_patches": patches,
         "repair_history": repair_history,
         "limit": limit,
@@ -545,6 +580,9 @@ async def demo_reset(req: Request):
     try:
         mock_details = await admin_client.reset()
         mock_status = "reset_successful"
+    except asyncio.CancelledError:
+        await gate.mark_reset_failed("Reset cancelled; outcome unknown")
+        raise
     except Exception as e:
         reset_failed = True
         fail_reason = str(e)
@@ -604,10 +642,13 @@ async def demo_mutation(mutation_req: AdminMutationRequest, req: Request):
             evidence_level=mutation_req.evidence_level,
         )
         return res
-    except Exception as e:
+    except BaseException as e:
+        await gate.mark_reset_failed("Mutation outcome unknown; reset required")
+        if isinstance(e, asyncio.CancelledError):
+            raise
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Downstream mutation configuration failed: {str(e)}"
+            detail="Downstream mutation configuration failed; reset required"
         )
     finally:
         await gate.release_mutation()

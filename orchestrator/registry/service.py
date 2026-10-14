@@ -241,6 +241,12 @@ class VersionedToolRegistry:
             if not isinstance(schema.required, list):
                 raise InvalidCandidateError("Argument schema required fields must be a list")
 
+            import jsonschema
+            try:
+                jsonschema.Draft7Validator.check_schema(schema.model_dump())
+            except jsonschema.SchemaError as exc:
+                raise InvalidCandidateError("Invalid argument JSON Schema") from exc
+
             # Internally derive monotonic version and canonical fingerprint
             target_version = derive_next_version(active.version)
             candidate_copy.version = target_version

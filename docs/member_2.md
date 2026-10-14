@@ -316,3 +316,19 @@
 6. Mutating writes are strictly blocked if pre-write audit fails.
 7. Post-write audit failure flags incomplete audit without retrying writes.
 8. Demo reset preserves persistent SQLite history while resetting runtime state.
+
+## Repository review patch against b5ce6e1
+
+The code review identified failures hidden by synthetic transport/model fixtures:
+- Real mock mutation controls support `ordinary` and `explicit_hint`, not `minimal`/`rich`.
+- Audited model runs used undefined baseline turn identifiers and nonexistent execution duration attributes.
+- Healing final verification accepted any assignee instead of the intended user.
+- Model calls and the complete recovery path were not covered by the declared deadline.
+- Rename/nesting previews changed the HTTP body while leaving model-visible argument names stale.
+- SSE advertised events before durable persistence and could replay a sequence with gaps.
+- Default healing implicitly trusted every rejection, omitted live credential resolution and did not initialize LLM fallback when the model was created lazily.
+- Operation identity omitted the run and logical write identity; distinct operations could share exhaustion tracking.
+
+The patch corrects these paths and adds `tests/healing/test_member2_review.py`, including real Member 1 ASGI API recovery for rename, type, nesting, header and combined drift, committed contract reuse, wrong-intent refusal, audited model orchestration, deadline bounds and durable public SSE replay. Existing tests now assert repaired model-visible contracts and establish directory evidence before agent writes. The test fake used for model rebinding shares its invocation state instead of replaying old turns.
+
+No Member 1, Member 3 or submission implementation is changed. Provider calls remain unverified without credentials; scripted model tests are not live model evidence.

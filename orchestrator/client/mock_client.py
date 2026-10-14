@@ -34,6 +34,11 @@ LEGITIMATE_KEY_ALLOWLIST = {
     "user_id",
     "assignee_id",
     "key_id",
+    "diagnosis_tokens", "prompt_tokens", "completion_tokens", "total_tokens",
+    "input_tokens", "output_tokens", "agent_tokens", "token_usage",
+    "model_usage", "diagnosis_token_details", "agent_token_usage",
+    "diagnosis_token_usage", "session_token_usage", "authorized_for_recovery",
+    "credential_reference", "credential_ref", "required_credential_reference",
 }
 
 SENSITIVE_KEY_SUBSTRINGS = [

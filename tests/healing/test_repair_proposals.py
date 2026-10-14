@@ -155,7 +155,7 @@ def test_explicit_rename_proposal():
     assert result.candidate_preview.status == "proposed_unvalidated"
     body_map = result.candidate_preview.request_mapping["body"]
     assert "assignee_id" in body_map
-    assert body_map["assignee_id"] == "{user_id}"
+    assert body_map["assignee_id"] == "{assignee_id}"
     assert "user_id" not in body_map
     assert body_map["ticket_id"] == "{ticket_id}"
 
@@ -193,7 +193,7 @@ def test_explicit_nesting_proposal():
     assert result.candidate_preview is not None
     body_map = result.candidate_preview.request_mapping["body"]
     assert "target" in body_map
-    assert body_map["target"]["id"] == "{user_id}"
+    assert body_map["target"]["id"] == "{target.id}"
     assert "user_id" not in body_map
     assert body_map["ticket_id"] == "{ticket_id}"
 
@@ -302,7 +302,7 @@ def test_complete_combined_proposal_with_unrelated_field_preservation():
     assert preview is not None
     assert preview.credential_reference == "secops_auth"
     assert "Authorization" in preview.headers
-    assert preview.request_mapping["body"]["target"]["id"] == "{user_id}"
+    assert preview.request_mapping["body"]["target"]["id"] == "{target.id}"
 
     # Unrelated fields strictly preserved
     assert preview.endpoint == "/tickets/assign"
@@ -433,7 +433,7 @@ def test_distinct_source_wire_and_schema_paths():
     # Wire target path is nested
     assert op.target_path == "target.id"
     # Mapping expansion uses template placeholder of the source argument
-    assert result.candidate_preview.request_mapping["body"]["target"]["id"] == "{user_id}"
+    assert result.candidate_preview.request_mapping["body"]["target"]["id"] == "{target.id}"
 
 
 # =========================================================================

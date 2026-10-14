@@ -22,7 +22,7 @@ async def test_orchestrator_registry_and_metrics():
         # Check patches endpoint returns explicit pending state
         patches_res = await client.get("/patches")
         assert patches_res.status_code == 200
-        assert patches_res.json()["status"] == "pending_member_2"
+        assert patches_res.json()["status"] == "available"
 
         # Check metrics endpoint returns honest counts
         metrics_res = await client.get("/metrics")

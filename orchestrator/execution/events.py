@@ -7,23 +7,7 @@ from pathlib import Path
 from orchestrator.models import RunEvent, RunEventType
 
 
-def redact_secrets(data: Any) -> Any:
-    """Recursively redacts sensitive keys such as authorization tokens or API keys."""
-    if isinstance(data, dict):
-        redacted = {}
-        for k, v in data.items():
-            k_lower = k.lower()
-            if any(s in k_lower for s in ["auth", "token", "secret", "password", "key", "credential"]):
-                if k_lower.endswith("_tokens") or k_lower in ("tokens", "token_usage") or k_lower.endswith("_token_count"):
-                    redacted[k] = redact_secrets(v)
-                else:
-                    redacted[k] = "[REDACTED]"
-            else:
-                redacted[k] = redact_secrets(v)
-        return redacted
-    elif isinstance(data, list):
-        return [redact_secrets(item) for item in data]
-    return data
+from orchestrator.client.mock_client import redact_secrets
 
 
 class EventSubscriber:
@@ -41,6 +25,8 @@ class EventBroadcaster:
         self._subscribers_by_run: Dict[str, List[EventSubscriber]] = {}
         self._schema: Optional[Dict[str, Any]] = None
         self._audit_store = audit_store
+        self._persistence_tasks = {}
+        self._persistence_errors = {}
         self._load_schema()
 
     def set_audit_store(self, audit_store: Any):
@@ -63,6 +49,8 @@ class EventBroadcaster:
         tool: Optional[str] = None,
         data: Optional[Dict[str, Any]] = None
     ) -> RunEvent:
+        if mode == "baseline":
+            mode = "normal"
         if run_id not in self._events_by_run:
             self._events_by_run[run_id] = []
         
@@ -90,39 +78,54 @@ class EventBroadcaster:
 
         self._events_by_run[run_id].append(event)
 
-        # Notify any active legacy SSE listeners
-        if run_id in self._listeners_by_run:
-            for q in self._listeners_by_run[run_id]:
-                try:
-                    q.put_nowait(event)
-                except asyncio.QueueFull:
-                    pass
-
-        # Notify any active bounded EventSubscribers
-        if run_id in self._subscribers_by_run:
-            for sub in list(self._subscribers_by_run[run_id]):
-                try:
-                    sub.queue.put_nowait(event)
-                except asyncio.QueueFull:
-                    sub.overflowed = True
-
-        # Persist event to audit store if available
         if self._audit_store:
+            previous = self._persistence_tasks.get(run_id)
+            store = self._audit_store
+            async def persist_then_deliver():
+                try:
+                    if previous is not None:
+                        await previous
+                    if run_id in self._persistence_errors:
+                        raise RuntimeError("Earlier event failed persistence")
+                    await store.record_event(run_id=run_id, sequence=sequence, timestamp=now_iso,
+                        mode=mode, event_type=event_type, tool=tool, data=clean_data)
+                    self._deliver(event)
+                except Exception as exc:
+                    self._persistence_errors[run_id] = exc
+                    try:
+                        await store.mark_audit_incomplete(run_id)
+                    except Exception:
+                        pass
             try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self._audit_store.record_event(
-                    run_id=run_id,
-                    sequence=sequence,
-                    timestamp=now_iso,
-                    mode=mode,
-                    event_type=event_type,
-                    tool=tool,
-                    data=clean_data,
-                ))
+                self._persistence_tasks[run_id] = asyncio.create_task(persist_then_deliver())
             except RuntimeError:
-                pass
+                self._persistence_errors[run_id] = RuntimeError("No event loop for durable event persistence")
+        else:
+            self._deliver(event)
 
         return event
+
+    def _deliver(self, event: RunEvent) -> None:
+        for q in self._listeners_by_run.get(event.run_id, []):
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                pass
+        for sub in list(self._subscribers_by_run.get(event.run_id, [])):
+            try:
+                sub.queue.put_nowait(event)
+            except asyncio.QueueFull:
+                sub.overflowed = True
+
+    async def flush(self, run_id: Optional[str] = None) -> None:
+        """Wait for serialized durable publication; surface storage failures."""
+        keys = [run_id] if run_id is not None else list(self._persistence_tasks)
+        for key in keys:
+            task = self._persistence_tasks.get(key)
+            if task is not None:
+                await asyncio.shield(task)
+            if key in self._persistence_errors:
+                raise RuntimeError("Event audit persistence failed") from self._persistence_errors[key]
 
     def get_events(self, run_id: str) -> List[RunEvent]:
         return list(self._events_by_run.get(run_id, []))
@@ -162,6 +165,8 @@ class EventBroadcaster:
     def reset(self):
         """Resets all in-memory events and listeners."""
         self._events_by_run.clear()
+        self._persistence_tasks.clear()
+        self._persistence_errors.clear()
         self._listeners_by_run.clear()
         self._subscribers_by_run.clear()
 

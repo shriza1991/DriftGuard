@@ -46,6 +46,7 @@ class RunEvent(BaseModel):
 
 
 class ToolArgumentSchema(BaseModel):
+    model_config = ConfigDict(extra="allow")
     type: str = "object"
     properties: Dict[str, Any]
     required: List[str] = Field(default_factory=list)
@@ -121,7 +122,8 @@ class OperationIdentity(BaseModel):
 
     @property
     def key(self) -> str:
-        return f"{self.tool_name}:{self.method.upper()}:{self.endpoint}"
+        identity = self.idempotency_key or self.tool_call_id or "unidentified"
+        return f"{self.run_id or 'unscoped'}:{identity}:{self.tool_name}:{self.method.upper()}:{self.endpoint}"
 
 
 class TimingInfo(BaseModel):

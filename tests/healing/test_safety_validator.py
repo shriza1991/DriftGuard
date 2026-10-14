@@ -176,11 +176,11 @@ def test_valid_rename_validation_accepted():
     assert val_res.authorized_for_recovery is True
     assert val_res.candidate is not None
     assert val_res.candidate.status == "validated_not_committed"
-    assert val_res.candidate.request_mapping["body"]["assignee_id"] == "{user_id}"
+    assert val_res.candidate.request_mapping["body"]["assignee_id"] == "{assignee_id}"
     assert "user_id" not in val_res.candidate.request_mapping["body"]
     assert val_res.candidate.endpoint == tool.endpoint
     assert val_res.candidate.method == tool.method
-    assert val_res.transformed_arguments == orig_args
+    assert val_res.transformed_arguments == {"ticket_id": 81, "assignee_id": "123"}
     assert val_res.proposal_fingerprint == plan_res.proposal_fingerprint
     assert val_res.candidate_fingerprint is not None
 
@@ -212,7 +212,7 @@ def test_valid_nesting_validation_accepted():
     )
 
     assert val_res.status == ValidationStatus.ACCEPTED
-    assert val_res.candidate.request_mapping["body"]["target"]["id"] == "{user_id}"
+    assert val_res.candidate.request_mapping["body"]["target"]["id"] == "{target.id}"
     assert val_res.authorized_for_recovery is True
 
 

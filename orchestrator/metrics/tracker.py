@@ -64,9 +64,10 @@ class MetricsTracker:
         usages = await audit_store.get_run_model_usages(run_id)
 
         # Tool execution counts
-        tool_dispatch_count = len(tool_execs)
-        original_dispatch_count = sum(1 for e in tool_execs if not e.is_repaired)
-        repaired_dispatch_count = sum(1 for e in tool_execs if e.is_repaired)
+        dispatched = [e for e in tool_execs if not e.failure or e.failure.get("http_status", 0) != 0 or e.failure.get("uncertain_write")]
+        tool_dispatch_count = len(dispatched)
+        original_dispatch_count = sum(1 for e in dispatched if not e.is_repaired)
+        repaired_dispatch_count = sum(1 for e in dispatched if e.is_repaired)
 
         # Repair attempt counts and timing
         repair_attempts_count = len(repairs)
@@ -99,7 +100,7 @@ class MetricsTracker:
         diag_usages = [u for u in usages if u.purpose == "diagnosis"]
 
         agent_breakdown = compute_usage_breakdown(agent_usages)
-        diag_breakdown = compute_usage_breakdown(diag_usages)
+        diag_breakdown = compute_usage_breakdown(diag_usages) if diag_usages else ModelUsageBreakdown(input_tokens=0, output_tokens=0, total_tokens=0, is_complete=True, status="complete")
         session_breakdown = combine_session_usage(agent_breakdown, diag_breakdown)
 
         # Turns count
@@ -169,7 +170,7 @@ class MetricsTracker:
                 run_metrics_list.append(rm)
 
         has_usages = any(
-            isinstance(rm.session_token_usage.total_tokens, int) for rm in run_metrics_list
+            rm.agent_token_usage.status != "unavailable" or rm.diagnosis_token_usage.total_tokens != 0 for rm in run_metrics_list
         )
         token_usage_str = "measured" if has_usages else "unavailable"
 

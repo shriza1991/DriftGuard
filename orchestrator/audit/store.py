@@ -1,6 +1,7 @@
 """SQLite-backed persistent audit store for DriftGuard.
 """
 from __future__ import annotations
+import threading
 import sqlite3
 import json
 import os
@@ -45,12 +46,13 @@ class SQLiteAuditStore:
     - Demo reset preserves audit history; no destructive purge endpoint.
     """
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, db_path: Optional[str] = None, timeout: float = 5.0):
         self.db_path = str(db_path or settings.sqlite_db_path)
         self.timeout = timeout
         self._initialized = False
+        self._init_lock = threading.Lock()
 
     def _get_connection(self) -> sqlite3.Connection:
         """Creates and configures a SQLite connection."""
@@ -207,6 +209,18 @@ class SQLiteAuditStore:
                     (1, datetime.now(timezone.utc).isoformat())
                 )
 
+            if current_version < 2:
+                conn.execute("""CREATE TABLE IF NOT EXISTS pre_write_authorizations (
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    operation_identity TEXT NOT NULL,
+                    candidate_id TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    data TEXT NOT NULL,
+                    PRIMARY KEY (run_id, operation_identity, candidate_id)
+                );""")
+                conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, ?)",
+                    (datetime.now(timezone.utc).isoformat(),))
+
             # Cleanup nonterminal runs from prior process interruptions
             now_iso = datetime.now(timezone.utc).isoformat()
             conn.execute("""
@@ -222,11 +236,12 @@ class SQLiteAuditStore:
 
     async def initialize(self):
         """Asynchronously initializes the database."""
-        await asyncio.to_thread(self._init_db_sync)
+        await asyncio.to_thread(self._ensure_init)
 
     def _ensure_init(self):
-        if not self._initialized:
-            self._init_db_sync()
+        with self._init_lock:
+            if not self._initialized:
+                self._init_db_sync()
 
     # -------------------------------------------------------------------------
     # Runs Persistence
@@ -285,9 +300,9 @@ class SQLiteAuditStore:
                     verified_outcome = ?,
                     error = ?,
                     termination_reason = ?,
-                    audit_status = ?
+                    audit_status = CASE WHEN audit_status = 'incomplete' OR ? = 'incomplete' THEN 'incomplete' ELSE 'complete' END
                 WHERE run_id = ?;
-            """, (status, now_iso, duration_ms, outcome_json, error, termination_reason, audit_status, run_id))
+            """, (status, now_iso, duration_ms, outcome_json, redact_secrets(error), termination_reason, audit_status, run_id))
 
     async def record_run_completed(
         self,
@@ -551,10 +566,7 @@ class SQLiteAuditStore:
                     VALUES (?, 'healing', 'Autonomous repair execution', 'running', ?, 'complete');
                 """, (run_id, datetime.now(timezone.utc).isoformat()))
 
-            # Record pre-write audit event
-            seq_cursor = conn.execute("SELECT COUNT(*) as c FROM events WHERE run_id = ?;", (run_id,))
-            seq = (seq_cursor.fetchone()["c"] or 0) + 1
-
+            # Separate internal authorization records from the public SSE sequence.
             now_iso = datetime.now(timezone.utc).isoformat()
             pre_write_data = json.dumps({
                 "pre_write_authorization": True,
@@ -565,9 +577,9 @@ class SQLiteAuditStore:
                 "operation_identity": operation_identity,
             })
             conn.execute("""
-                INSERT OR IGNORE INTO events (run_id, sequence, timestamp, mode, event_type, tool, data)
-                VALUES (?, ?, ?, 'healing', 'pre_write_audit_authorized', ?, ?);
-            """, (run_id, seq, now_iso, tool_name, pre_write_data))
+                INSERT OR IGNORE INTO pre_write_authorizations (run_id, operation_identity, candidate_id, timestamp, data)
+                VALUES (?, ?, ?, ?, ?);
+            """, (run_id, operation_identity, candidate_id, now_iso, pre_write_data))
 
     async def record_pre_write_audit(
         self,

@@ -192,6 +192,10 @@ class ToolExecutor:
         if not snapshot.fingerprint:
             snapshot.fingerprint = snapshot.compute_fingerprint()
 
+        approved = {("find_user", "GET", "/users"), ("assign_ticket", "POST", "/tickets/assign"), ("get_ticket", "GET", "/tickets/{ticket_id}")}
+        if (snapshot.name, snapshot.method.upper(), snapshot.endpoint) not in approved:
+            raise ValueError("Unapproved business tool destination")
+
         # 3. Setup logical execution context & identity
         if context is None:
             context = ExecutionContext(
@@ -410,7 +414,13 @@ class ToolExecutor:
             headers["Idempotency-Key"] = idempotency_key
 
         if auth_token:
-            headers["Authorization"] = f"Bearer {auth_token}"
+            marker = "{" + snapshot.credential_reference + "}"
+            has_binding = any(marker in value for value in headers.values())
+            if not has_binding:
+                headers["Authorization"] = f"Bearer {auth_token}"
+            for header, value in list(headers.items()):
+                if marker in value:
+                    headers[header] = value.replace(marker, auth_token)
 
         # Body
         json_body: Optional[Any] = None
@@ -557,6 +567,7 @@ class ToolExecutor:
                 write_attempted=is_write,
                 uncertain_write=uncertain,
                 migration_hint=norm_failure.migration_hint,
+                validation_details=norm_failure.normalized_errors,
                 known_secrets=known_sec_list,
             )
 
