@@ -109,6 +109,18 @@
   Drift adaptations primarily modify `request_mapping` to bridge unchanged caller arguments to downstream wire changes. Argument schemas are updated only when contract types or caller parameters genuinely change.
 - **Rationale**: Preserves the immutability of business intent (AGENTS.md Invariant 3) while accommodating complex wire structural drifts like nested objects or renamed fields.
 
+## ADR-022: Independent Deterministic Validation and Candidate Derivation
+- **Context**: Relying on candidate previews supplied by planners or external components introduces security vulnerabilities if the preview was tampered with, miscompiled, or contains unbacked contract changes.
+- **Decision**: The safety validator (`orchestrator/healing/validator.py`) never trusts supplied candidate previews. It independently derives the candidate definition from the base snapshot and validated operations, then strictly compares the derived candidate with the preview (if provided), rejecting any discrepancies. The validator also recomputes the proposal fingerprint and checks that every evidence path resolves into observable evidence.
+- **Rationale**: Guarantees zero unbacked mutations and maintains verifiable integrity between observed evidence, declarative plan, and executable candidate contracts.
+
+## ADR-023: Strict Conversion Allowlist and Write Uncertainty Protection in Safety Validation
+- **Context**: Automatic type conversions (e.g. string to int) can silently truncate data (e.g. converting `"0123"` to `123` drops leading zeros, or `"12.34"` drops decimals). Furthermore, stateful writes that experience network drops or succeed downstream (HTTP 200) with response drift risk duplicate mutations if blindly retried.
+- **Decision**:
+  1. Implement a strict, non-lossy conversion allowlist: string-to-integer conversion requires exact lexical invertibility (`str(int(val)) == val`), explicitly rejecting leading-zero strings (`"0123"`), decimals (`"12.34"`), bool-as-int (`True`), and non-numeric strings.
+  2. Enforce strict write uncertainty protection: any observation with `uncertain_write=True` or an HTTP POST write returning 200/201 (response drift) is strictly denied retry authorization (`authorized_for_recovery = False`).
+- **Rationale**: Eliminates data corruption and duplicate side-effects on downstream services, ensuring safe recovery execution under Task 8.
+
 ---
 
 ## Technical Clarifications & Invariant Reminders
@@ -118,5 +130,7 @@
 > 1. `expected_schema` alone in an error response does **not** establish semantic field correspondence (e.g. that `assignee_id` corresponds to `user_id`).
 > 2. An HTTP `401 Unauthorized` or `422 Unprocessable Content` status alone does **not** prove contract drift (it may indicate genuine authorization failure or bad caller intent).
 > 3. Proposed repair candidates remain strictly `proposed_unvalidated` until validated by Task 7 and staged/committed by Task 8.
+> 4. Validated candidates are marked `status: "validated_not_committed"`. Validation is a point-in-time check; Task 8 re-verifies version freshness under the tool lock before recovery dispatch.
+
 
 

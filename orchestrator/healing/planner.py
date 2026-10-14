@@ -470,6 +470,16 @@ def plan_repair(
                 for part in parts[:-1]:
                     curr = curr.setdefault(part, {})
                 curr[parts[-1]] = orig_val
+        elif op.operation_type == RestrictedOperationType.CAST_TYPE:
+            target_type = "integer" if "integer" in (op.conversion_policy or "").lower() else "string"
+            if op.source_path and op.source_path in preview.argument_schema.properties:
+                prop = dict(preview.argument_schema.properties[op.source_path])
+                prop["type"] = target_type
+                preview.argument_schema.properties[op.source_path] = prop
+            elif op.target_path and op.target_path in preview.argument_schema.properties:
+                prop = dict(preview.argument_schema.properties[op.target_path])
+                prop["type"] = target_type
+                preview.argument_schema.properties[op.target_path] = prop
 
     preview.request_mapping = new_req_mapping
 
@@ -527,10 +537,10 @@ def emit_patch_proposed_event(
     run_id: str,
     planning_result: PlanningResult,
     mode: str = "healing",
-) -> None:
+) -> Any:
     """Emits patch_proposed event strictly when a valid proposal was formulated, labeled as unvalidated."""
     if planning_result.status == PlanningStatus.PROPOSED and planning_result.proposal:
-        event_broadcaster.publish_event(
+        return event_broadcaster.publish_event(
             run_id=run_id,
             event_type="patch_proposed",
             mode=mode,
@@ -555,4 +565,5 @@ def emit_patch_proposed_event(
                 "validation_required": True,
             },
         )
+    return None
 

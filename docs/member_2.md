@@ -163,12 +163,22 @@
 
 ## 4. Next Tasks
 
-- [ ] **Task 7: Safety Validation & Invariants (`orchestrator/healing/validator.py`)**:
-  - Statically verify proposed patches against strict safety constraints before any live execution.
-  - Verify proposed patch does not invent new business arguments (e.g. `priority_tier`).
-  - Verify no lossy conversions or unapproved domain redirects.
-  - Keep caller arguments immutable.
-  - Authorize or reject proposals with typed `PatchDecision`.
+- [x] **Task 7: Safety Validation & Invariants (`orchestrator/healing/validator.py`)**:
+  - Independent Deterministic Validation: Pure validation engine (`validate_repair_proposal`) independently verifying proposal integrity, recomputing proposal fingerprints, and verifying that every evidence path resolves into the failure observation.
+  - Zero Trust for Planner Previews: Derives the candidate contract independently from base snapshot and validated operations, rejecting tampered or diverging previews.
+  - Value Provenance & Conversion Allowlist:
+    - Sourced strictly from caller arguments; zero invented business values or hallucinated defaults.
+    - Lossless string-to-integer allowlist: strictly rejects leading-zero strings (`"0123"`), decimal truncation (`"12.34"`), boolean-as-int (`True`), and nonnumeric strings.
+    - Defensive deepcopy ensures original caller arguments remain strictly immutable.
+  - Header & Credential Safety: Maps headers only through approved configuration, validates against injected local credential resolver, and strictly forbids raw secrets from entering candidates, decisions, fingerprints, or events.
+  - Adapted-Retry Safety Enforcement:
+    - Uncertain writes remain strictly blocked (`uncertain_write=True`).
+    - Pre-execution rejection confirmed via HTTP status (400, 401, 403, 422).
+    - Repeat POST write blocked on HTTP 200 response drift (prevents duplicate mutations).
+  - Accepted Output: Defensively isolated candidate `ToolDefinition` labeled `status: "validated_not_committed"`, transformed arguments copy, evidence summary, and retry authorization. Validation is point-in-time; Task 8 rechecks version/lock before execution.
+  - Event Envelopes: Emits `patch_validated` and `patch_rejected` adhering to `contracts/events.schema.json`.
+  - Targeted Test Suite (`tests/healing/test_safety_validator.py`): 20 comprehensive unit tests covering valid proposals, tampered fingerprints, forged evidence, diverging previews, stale versions, destination collisions, leading zeros, decimal truncation, bool-as-int, nonnumeric strings, missing credentials, secret leakage, uncertain writes, response drift repeat write prevention, inputs/registry immutability, and event envelopes.
+  - Full Regression Verification: All 103 backend tests passing cleanly.
 
 - [ ] **Task 8: Staged Patch & Verified Recovery Execution (`orchestrator/healing/recovery.py`)**:
   - Stage the authorized patch in memory with per-tool lock.

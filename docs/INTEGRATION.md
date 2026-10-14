@@ -417,19 +417,92 @@ The deterministic planner enforces strict evidence requirements:
 
 ---
 
-## 9. Server-Sent Events (SSE) Contract & Public Examples (For Member 3)
+## 10. Deterministic Safety Validation (Member 2 Task 7)
 
-Each event emitted across `/runs/{run_id}/events` strictly conforms to `contracts/events.schema.json`.
-All secrets in `data` are recursively redacted with `[REDACTED]` prior to emission.
+### 10.1 Architecture & Inputs
+The safety validator (`orchestrator/healing/validator.py`) statically inspects declarative proposals before any live execution or registry staging.
+Inputs:
+- Captured `ToolDefinition` snapshot and immutable `original_arguments`.
+- `FailureObservation` and `ClassificationResult`.
+- `PlanningResult` / `RepairProposal`.
+- Current active registry snapshot.
+- Read-only approved header-to-credential bindings.
+- Injected local credential-availability resolver callable.
+- Execution guarantees (`pre_execution_rejection`, etc.).
 
-### Public Event Examples Catalog:
-- **Normal Baseline Run**: [`contracts/examples/run_events_normal.json`](file:///contracts/examples/run_events_normal.json)
-  - `run_started` &rarr; `tool_call_started (find_user)` &rarr; `tool_call_started (assign_ticket)` &rarr; `tool_call_started (get_ticket)` &rarr; `run_completed`.
-- **Downstream Tool Failure**: [`contracts/examples/run_events_tool_failure.json`](file:///contracts/examples/run_events_tool_failure.json)
-  - `run_started` &rarr; `tool_call_started` &rarr; `tool_call_failed` (422 `SCHEMA_MISMATCH`) &rarr; `run_failed`.
-- **Patch Rejection (Safety Refusal)**: [`contracts/examples/run_events_patch_rejection.json`](file:///contracts/examples/run_events_patch_rejection.json)
-  - `tool_call_failed` &rarr; `diagnosis_started` &rarr; `patch_proposed` &rarr; `patch_rejected` (invariant violation) &rarr; `run_failed`.
-- **Terminal Status Summaries**: [`contracts/examples/run_events_terminal_status.json`](file:///contracts/examples/run_events_terminal_status.json)
-  - Demonstrates terminal payloads for both completed and failed runs with duration and outcome metrics.
+### 10.2 Strict Invariant Checks
+1. **Freshness & Identity Gating**: Snapshot, observation, proposal base, and active registry must have matching names, versions, and fingerprints. Stale proposals against updated registries are rejected.
+2. **Proposal Fingerprint Recomputation**: Recomputes SHA-256 fingerprint over canonical plan operations. Any tampering or operation misordering is rejected.
+3. **Evidence Grounding**: Every operation's `evidence_path` must resolve into observable data in `FailureObservation` and corroborate the operation.
+4. **Independent Candidate Derivation**: The validator never trusts supplied candidate previews; it derives the candidate definition independently and rejects inconsistent previews.
+5. **Value Provenance & Conversion Allowlist**:
+   - Every required business value originates from caller arguments; zero invented defaults.
+   - String-to-integer conversion requires lossless lexical conversion (`str(int(x)) == x`).
+   - Strictly rejects leading zeros (`"0123"`), decimal truncation (`"12.34"`), boolean-as-int (`True`), and nonnumeric strings.
+   - Caller input arguments remain strictly immutable (deepcopied).
+6. **Header & Credential Safety**:
+   - Required headers must be present in approved configuration.
+   - Credential references must be verified locally via injected resolver.
+   - Secret literals are strictly forbidden from entering candidate definitions, decisions, or events.
+7. **Adapted-Retry Safety**:
+   - Uncertain writes (`uncertain_write=True`) strictly block retry authorization.
+   - Pre-execution rejection is verified via HTTP status (400, 401, 403, 422).
+   - Write requests (`POST`) that succeeded downstream (200/201) with response drift cannot be authorized for write retries (avoids duplicate mutations).
+   - Candidate definitions are marked `status: "validated_not_committed"`. Validation is point-in-time; Task 8 rechecks tool lock before execution.
+
+### 10.3 Cross-Member Coordination Handoffs
+
+#### For Member 1 (Mock API & Safety Guarantees):
+- Downstream endpoints must return explicit pre-execution rejection HTTP codes (400, 401, 403, 422) if an invalid request was rejected before modifying state.
+- If a write mutation returns 200/201, DriftGuard assumes state modification has occurred and will refuse automated recovery retries to avoid duplicate ticket assignments.
+
+#### For Member 3 (Frontend & SSE Events):
+Event schemas for validation decisions emitted over `/runs/{run_id}/events`:
+- **`patch_validated` Event**:
+```json
+{
+  "run_id": "run-b8f2c19a",
+  "sequence": 5,
+  "timestamp": "2026-10-14T12:00:01.250Z",
+  "mode": "healing",
+  "type": "patch_validated",
+  "tool": "assign_ticket",
+  "data": {
+    "tool": "assign_ticket",
+    "base_version": "1.0.0",
+    "base_fingerprint": "d6ce0accd128e387",
+    "proposal_fingerprint": "b4f2c8d19a02ec71",
+    "candidate_fingerprint": "8f391c4d92a104e6",
+    "recovery_permitted": true,
+    "checks_passed": 12,
+    "status": "validated_not_committed",
+    "validation_passed": true
+  }
+}
+```
+- **`patch_rejected` Event**:
+```json
+{
+  "run_id": "run-b8f2c19a",
+  "sequence": 5,
+  "timestamp": "2026-10-14T12:00:01.250Z",
+  "mode": "healing",
+  "type": "patch_rejected",
+  "tool": "assign_ticket",
+  "data": {
+    "tool": "assign_ticket",
+    "base_version": "1.0.0",
+    "base_fingerprint": "d6ce0accd128e387",
+    "proposal_fingerprint": "b4f2c8d19a02ec71",
+    "rejection_reasons": [
+      "Rejecting conversion of leading-zero string '0123' to integer: leading zeros would be lost."
+    ],
+    "failed_checks": ["lossless_conversion:user_id"],
+    "status": "rejected",
+    "validation_passed": false
+  }
+}
+```
+
 
 

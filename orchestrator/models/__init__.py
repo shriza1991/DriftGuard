@@ -199,3 +199,4 @@ class PatchDecision(BaseModel):
 
 
 from orchestrator.models.proposal import PlanningStatus, PlannedOperation, PlanningResult
+from orchestrator.models.validation import ValidationStatus, SafetyCheckRecord, ValidationResult

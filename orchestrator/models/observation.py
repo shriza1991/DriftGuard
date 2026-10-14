@@ -63,6 +63,10 @@ class FailureObservation(BaseModel):
         return self.execution_phase
 
     @property
+    def status_code(self) -> Optional[int]:
+        return self.http_status
+
+    @property
     def registry_fingerprint(self) -> str:
         return self.fingerprint
 
