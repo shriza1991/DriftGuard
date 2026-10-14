@@ -58,19 +58,81 @@ export interface SystemMetrics {
 
 export interface RunSummary {
   run_id: string;
-  status: 'running' | 'completed' | 'failed';
-  mode: 'normal' | 'healing';
+  status: 'running' | 'completed' | 'failed' | 'interrupted';
+  mode: 'normal' | 'healing' | 'baseline';
   task: string;
   created_at: string;
-  completed_at?: string;
-  duration_ms?: number;
-  outcome?: {
-    ticket_id: number;
-    target_user_name: string;
-    resolved_user_id: string;
-    verified_assignee_id: string;
-    verified: boolean;
-    status: string;
-  };
-  error?: string;
+  completed_at: string | null;
+  duration_ms: number | null;
+  outcome: Record<string, unknown> | null;
+  error: string | null;
+  model_usage: Record<string, unknown> | null;
+  termination_reason: string | null;
+  execution_type: string | null;
+  audit_status: string;
+}
+
+export interface CreateRunRequest {
+  mode: 'normal' | 'baseline' | 'healing';
+  task: string;
+  execution_type: 'deterministic' | 'model_driven_baseline' | 'model_driven_healing';
+  wait: false;
+}
+
+export interface MutationResponse {
+  active_scenario: string;
+  enabled: boolean;
+  evidence_level: string;
+  description?: string;
+}
+
+export interface ResetResponse {
+  status: 'reset_completed';
+  orchestrator: string;
+  mock_api: string;
+  audit_store: string;
+}
+
+export interface PatchOperation {
+  operation_type: 'rename_argument' | 'cast_type' | 'nest_argument' | 'set_header';
+  source_path: string | null;
+  target_path: string | null;
+  conversion_policy: string | null;
+  credential_reference: string | null;
+  value_provenance: string;
+  evidence_path: string;
+  evidence_summary: string;
+}
+
+export interface RepairAttempt {
+  run_id: string;
+  tool_name: string;
+  base_version: string;
+  base_fingerprint: string;
+  proposal_fingerprint: string;
+  candidate_id: string | null;
+  candidate_version: string | null;
+  candidate_fingerprint: string | null;
+  diagnosis_source: string;
+  proposal: Record<string, unknown>;
+  candidate_definition: ToolRegistryEntry | null;
+  validation_status: 'accepted' | 'rejected' | 'pending' | string;
+  validation_details: Record<string, unknown> | null;
+  recovery_status: string;
+  business_effect_occurred: boolean;
+  verification_succeeded: boolean;
+  registry_committed: boolean;
+  committed_version: string | null;
+  termination_reason: string | null;
+  created_at: string;
+}
+
+export interface PatchPage {
+  status: string;
+  notice: string;
+  repair_history: RepairAttempt[];
+  limit: number;
+  offset: number;
+  count: number;
+  invalid_count: number;
 }

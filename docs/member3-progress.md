@@ -140,3 +140,95 @@ The sample loading state appears while event playback is active; empty states ap
 The Phase 0 questions remain open: an agreed paired comparison protocol and run identifiers; explicit model-driven baseline/healing selection; the real `/demo/mutation` request/response; reset semantics for `app.state.registry` and SQLite history; SSE replay/reconnection and terminal behavior; an authoritative patch projection with candidate/committed evidence; and measured adaptation, safe-refusal, timing, and token fields. Until those contracts are coordinated, live comparison, live mutation, live contract diff, live audit, and benchmark claims remain unavailable. Sample outcomes must not be reported as backend verification.
 
 **Phase 1 status: PASSED — FIXTURE DASHBOARD**, with visual inspection blocked by the local browser connection boundary. Phase 2 has not started.
+
+---
+
+## Phase 2 — orchestrator connection (14 October 2026)
+
+### Recheck before implementation
+
+Phase 1 fixture files, tests, build scripts, root `AGENTS.md`, `docs/member_3`, shared contracts, and current `orchestrator/api/routes.py`, `orchestrator/execution/events.py`, agent outcomes, and mock mutation route were reread. The entry tree was clean on `main` and one commit ahead of `origin/main`; no backend or contract file was edited. The Phase 1 fixture dashboard still built and its six state tests passed.
+
+**The backend changed after the Phase 0/1 audit.** Its current routes, rather than the stale `contracts/api-contracts.md` examples, establish these Phase 2 facts:
+
+| Route | Current behavior used by frontend |
+| --- | --- |
+| `POST /runs` | Body has `mode`, `task`, `execution_type`, `wait:false`. It validates mode/type combinations, gates concurrent operations, starts an app-managed background task, and returns HTTP 200 with one `run_id` and usually `status:"running"`. `mode:normal` + `execution_type:deterministic`, `mode:baseline` + `model_driven_baseline`, and `mode:healing` + `model_driven_healing` are explicit frontend selections. No paired comparison operation or IDs. |
+| `GET /runs/{run_id}` | Authoritative summary with `running/completed/failed/interrupted`, nullable outcome/error/timing/usage, `termination_reason`, `execution_type`, and `audit_status`; SQLite fallback may omit model usage. |
+| `GET /runs/{run_id}/events` | Default `data:` messages with `id: <sequence>`, plus named `event:error` for audit/overflow. Supports `Last-Event-ID` or `cursor` query, rejects conflicting values, replays durable events after a cursor, then live events. Initial EventSource URL omits a query cursor so native reconnect can send `Last-Event-ID` without a conflict. A manual full replay reopens without a cursor and deduplicates by `(run_id, sequence)`. |
+| `POST /demo/reset` | Requires idle admission; downstream mock reset must succeed before in-memory state and `app.state.registry` reset. Returns 502 and marks state unknown if downstream reset fails. SQLite audit/metrics history remains. |
+| `POST /demo/mutation` | Implemented forwarding with `{scenario,enabled,evidence_level:"ordinary"}`. Accepts the allowlisted scenarios (including `none`); frontend requires the returned scenario/enabled values to match before enabling runs. Errors leave the scenario unconfirmed until a reset or successful apply. |
+
+`contracts/api-contracts.md` still describes a 202 run start and a 501 mutation route, and does not specify current SSE resume and reset behavior. Member 2 should coordinate updating this shared contract. No frontend model credential or credential-bearing Vite variable was added. Development uses the existing `/api` Vite proxy to `127.0.0.1:8000`; `VITE_ORCHESTRATOR_URL` can override the public orchestrator address when proxying is unavailable.
+
+### Frontend changes
+
+- `frontend/src/services/api.ts` is one typed client for run creation/status, SSE URL, reset, mutation, registry, and metrics. Network/HTTP/response-shape errors are explicit. The client never falls back to fixtures.
+- `frontend/src/services/eventStream.ts` parses default SSE messages defensively, checks run identity and `id`/sequence, deduplicates replay, asks for a full replay after a sequence gap or closed connection, handles native reconnect state, and closes stale streams. Named server error messages trigger replay. The client waits for a contiguous terminal sequence before treating the event stream as complete. Full replay is capped at two client attempts; an incomplete stream is labeled as such.
+- `frontend/src/App.tsx` uses an immediate command gate, user-triggered `POST /runs`, the returned run ID, per-lane events, GET status polling, and a final GET summary. A terminal GET with missing terminal SSE gets a brief replay grace period, then closes with an explicit incomplete-timeline notice. Source switching and unmount close obsolete streams; late responses are ignored by generation. Reset and mutation actions are gated and confirmed against response fields.
+- The Demo tab has live normal, baseline, and healing actions. Normal is labeled deterministic. Live mutation selection is enabled, but run buttons require a confirmed reset or mutation apply. The live comparison button remains disabled because the backend does not provide a fair paired operation. Registry/Audit displays received live repair events; Benchmark does not present independent live runs as a controlled comparison. Live outcome labels and verification values come from GET `/runs/{run_id}`, with unsupported values shown as unavailable. Fixtures retain the persistent sample label.
+- `frontend/src/state/commandGate.ts` supplies synchronous lock semantics; `runState.ts` adds authoritative summary classification and credential-safe display handling. No dependencies were added.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| `npm run build` | Passed TypeScript and Vite production build. Existing Vite/React plugin deprecation notices are nonfatal. |
+| `node --experimental-transform-types --test tests/fixture-state.test.ts tests/live-stream.test.ts` | Passed 13/13 tests: fixtures, candidate/commit states, API request paths/bodies, malformed events, replay dedupe/gaps, transport reconnect, stale-stream closure, authoritative summary classification, and immediate double-action gate. |
+| `git diff --check` | Passed; Git displayed only checkout line-ending conversion warnings. |
+| `Invoke-WebRequest http://127.0.0.1:8000/health -TimeoutSec 3` | Failed: local socket access forbidden by environment permissions. No orchestrator HTTP response was obtained. |
+| Python import probe | `python --version` reported 3.13.1; import probe printed a broken `C:\Python313\python.exe` location warning despite importing installed packages. It did not establish a usable live service. |
+| Frontend lint | No lint script/config is defined in `frontend/package.json`; no lint result is claimed. |
+| Browser/live E2E | No live normal or rename run, real SSE timeline, final GET, interactive rapid-click, or rendered browser inspection could be observed because local HTTP sockets are blocked. Phase 1 browser attempts at preview localhost also timed out. Unit tests verify client/state behavior only. |
+
+### Remaining Member 2 dependencies and questions
+
+1. Add a controlled comparison operation or protocol that resets the mock and active registry to equivalent initial state for each lane, preserves both run IDs/outcomes across reset, and states how history is linked. The frontend intentionally cannot claim a fair live comparison from independent calls.
+2. Update `contracts/api-contracts.md` and sample payloads for the current async 200 run start, `execution_type`, mutation request/response, reset 502 behavior, and SSE IDs/replay/error events. Coordinate shared changes per root `AGENTS.md`.
+3. Confirm whether `termination_reason` or another authoritative field will classify safe refusals. The current frontend only labels a live safe refusal when an explicit `safe_refusal` marker is present; a generic failed run is shown as failed.
+4. Define public sanitized original/candidate request snapshots and patch/audit semantics for the live contract diff, including authoritative candidate-versus-committed state. The event timeline now shows live evidence; the current API does not guarantee the request pair needed for the diff card.
+5. Confirm aggregate benchmark fields for adaptation denominator, safe refusals, token completeness, and history-scoped metrics. The UI does not infer missing measurements from samples or a hard-coded zero.
+
+**Phase 2 status: IMPLEMENTED — LIVE VERIFICATION BLOCKED.** The client and UI are wired to current route code, but no browser-to-orchestrator workflow could be observed in this environment. Phase 3 has not started.
+
+---
+
+## Phase 3 — contract diff, registry, and audit views (14 October 2026)
+
+### Gate and current contract
+
+Phase 2 remains **IMPLEMENTED — LIVE VERIFICATION BLOCKED**. This phase implemented views independently and does not claim that a browser, frontend proxy, or backend run was verified. Current `orchestrator/api/routes.py`, `orchestrator/audit/models.py`, `orchestrator/audit/store.py`, `orchestrator/healing/recovery.py`, planner/validator models, tool-call events, and `contracts/api-contracts.md` were inspected again. The shared markdown contract still describes `/patches` as scaffolding, while the route now returns `status:"available"`, paginated `repair_history`, and `active_patches` filtered from records with `registry_committed:true`.
+
+`GET /registry` returns only active tool definitions, version/fingerprint/schema/mappings, with a top-level constant `version:"v1"`. It does not expose staged candidates. `GET /patches?limit&offset` returns persisted `PersistedRepairAttempt` records ordered newest first. Each has run/tool/base/proposal identity, proposal operations, optional candidate definition, validator status/details, recovery status, verification flag, commit flag/version, and termination reason. The backend persists `candidate_version` as `res.committed_version`, so it can be null for a valid uncommitted candidate; the UI uses the recorded candidate definition version when present. The route does not include original caller arguments or full verification detail. For the **current** run, `tool_call_started.data.arguments` supplies the original arguments and `validation_details.transformed_arguments` supplies candidate arguments. Historical records without current run events show the original as unavailable. A successful business verification is available as an audit boolean; method/ticket/assignee detail is shown only when the matching `recovery_verified` event is available.
+
+### Frontend changes
+
+- `frontend/src/services/api.ts` now requests and validates `/registry` and `/patches`. Top-level invalid patch responses fail clearly; incomplete individual repair records are omitted with a warning count. The first page loads 100 records, with a “Load older repair attempts” action for more history. Registry malformed tool definitions are rejected rather than displayed as empty state.
+- `frontend/src/state/patchState.ts` projects structured proposal operations, request pairs, lifecycle state, current-run identity, active-version matching, and second-run reuse evidence. Original arguments are matched to the proposal fingerprint and a preceding tool call with the base version/fingerprint; ambiguous calls remain unavailable. Operations are rendered from recorded `transform_spec.operations`, never from the selected scenario. The combined test record renders `{"ticket_id":81,"user_id":"123"}` against recorded validator output `{"ticket_id":81,"target":{"id":123}}`, plus nest/cast/Authorization summaries.
+- `frontend/src/components/PatchInspector.tsx` shows Stage → Retry → Verify → Commit; run/tool/version and fingerprint identity; changed paths, conversion policy, per-operation evidence; acceptance/rejection reasons; retry outcome; independent verification; original/candidate requests and schemas when recorded; and sanitized expandable JSON. An audit commit is marked historical if the current `/registry` version/fingerprint no longer matches it after reset. Header credential references/values are hidden in summaries and JSON.
+- `frontend/src/components/DashboardViews.tsx` connects the current run’s Demo diff to its matching patch, displays active registry definitions with expandable sanitized JSON, lists rejected and accepted repair history, and lets the user inspect a historical record explicitly. A selected old record cannot become the new run’s default inspector. A reuse panel requires a prior committed record, matching current active tool version/fingerprint, and a second run’s actual `tool_call_started` event. It reports whether `diagnosis_started` was received; it makes no cache-hit claim.
+- `frontend/src/App.tsx` refreshes registry, patch history, and metrics after terminal operations and reset. The selected mutation remains applied across another run, so a second task can be issued without resetting a healed registry. No backend or shared contract files changed.
+
+### Verification and limitations
+
+| Case | Evidence / result |
+| --- | --- |
+| Accepted patch, successful verification and commit | Pure projection test confirms recorded operations, exact original/candidate pair, and active version match only against matching `/registry` version/fingerprint. UI code renders the four lifecycle steps. No live accepted patch observed. |
+| Rejected patch, validated but uncommitted, failed retry | Tests keep `registry_committed:false`, preserve rejection reason, and leave the active tool at its original version. UI shows these as candidate/rejected, never as active commits. No live retry observed. |
+| Combined transformation | Test verifies `user_id → target.id`, lossless string-to-integer summary, and Authorization from configured credentials, using structured operation records. No live combined run observed. |
+| Empty/invalid responses | Tests distinguish empty history from malformed top-level response and omit an incomplete row with a warning; invalid registry tools are rejected. |
+| Second-task reuse | Test requires prior committed patch, matching active registry, and the second run’s tool-call version/fingerprint. Actual no-reset second run unavailable, so reuse remains unverified live. |
+| `npm run build` | Passed TypeScript and Vite production build; only pre-existing Vite/plugin deprecation notices. |
+| `node --experimental-transform-types --test tests/fixture-state.test.ts tests/live-stream.test.ts tests/patch-state.test.ts` | Passed **20/20** tests, including ambiguous same-tool request pairing. |
+| `git diff --check` | Passed; line-ending conversion warnings only. |
+| `Invoke-WebRequest http://127.0.0.1:8000/registry -TimeoutSec 3` | Failed with socket-access permission error; no live registry, patch response, browser rendering, or second-task reuse could be checked. |
+| Lint | No lint script/config exists; no lint result claimed. |
+
+### Backend questions for Member 2
+
+1. Update `contracts/api-contracts.md` for current `/registry` and `/patches` shapes and pagination, including the difference between historical `active_patches` and the **currently active** `/registry` definitions.
+2. Expose sanitized original caller arguments (or a run-scoped tool execution projection) for historical repair records, plus independent verification details, if the UI must inspect an older run without reopening its event stream.
+3. Persist a genuine staged candidate version separately from `committed_version`; current `candidate_version` is null until commit even when `candidate_definition` exists.
+4. Provide a live environment or permitted local HTTP path for frontend-to-orchestrator verification. The existing socket restriction still blocks Phase 2 and Phase 3 end-to-end evidence.
+
+**Phase 3 status: PARTIAL.** The frontend view implementation, build, and state/client tests pass. Live registry, patch lifecycle, and second-task reuse remain unverified because local HTTP is inaccessible. Phase 4 has not started.

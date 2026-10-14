@@ -1,4 +1,4 @@
-import type { RunEvent } from '../types';
+import type { RunEvent, RunSummary } from '../types';
 
 export type RunOutcome = 'idle' | 'running' | 'verified' | 'completed_unverified' | 'failed' | 'safe_refusal';
 export type CandidateState = 'none' | 'proposed' | 'validated' | 'rejected' | 'committed';
@@ -27,6 +27,21 @@ export function runOutcome(events: RunEvent[]): RunOutcome {
     : 'completed_unverified';
 }
 
+export function summaryOutcome(summary: RunSummary | null, events: RunEvent[]): RunOutcome {
+  if (!summary) return events.length ? 'running' : 'idle';
+  if (summary.status === 'running') return 'running';
+  if (summary.status === 'failed' || summary.status === 'interrupted') {
+    return summary.termination_reason === 'safe_refusal' || summary.outcome?.safe_refusal === true ? 'safe_refusal' : 'failed';
+  }
+  return summary.outcome?.verified === true || summary.outcome?.downstream_verified === true
+    ? 'verified' : 'completed_unverified';
+}
+
+export function hasEventGap(events: RunEvent[]): boolean {
+  const ordered = mergeEvents([], events);
+  return ordered.some((event, index) => event.sequence !== index + 1);
+}
+
 export function candidateState(events: RunEvent[]): CandidateState {
   let state: CandidateState = 'none';
   for (const event of mergeEvents([], events)) {
@@ -46,14 +61,20 @@ export function eventTone(type: RunEvent['type']): 'blue' | 'amber' | 'green' | 
 }
 
 export function safeDisplay(value: unknown): unknown {
+  if (typeof value === 'string') return value.replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]').replace(/\bsk-[A-Za-z0-9_-]{8,}/g, '[redacted]').replace(/credential reference ['"][^'"]+['"]/gi, 'credential reference [configured]');
   if (Array.isArray(value)) return value.map(safeDisplay);
   if (value && typeof value === 'object') {
     return Object.fromEntries(Object.entries(value).map(([key, entry]) => {
       const normalized = key.toLowerCase();
       const isUsage = normalized.includes('token') && (normalized.endsWith('_tokens') || normalized === 'token_usage');
-      const sensitive = /auth|secret|password|credential|api.key|token/i.test(key) && !isUsage;
+      const sensitive = /auth|secret|password|credential|api.key|token/i.test(key) && !isUsage ||
+        normalized === 'value_provenance' && typeof entry === 'string' && entry.includes('credential_reference');
       return [key, sensitive ? '[redacted]' : safeDisplay(entry)];
     }));
   }
   return value;
+}
+
+export function safeText(value: unknown): string {
+  return String(safeDisplay(value));
 }

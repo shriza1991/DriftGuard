@@ -1,71 +1,63 @@
-import { RunEvent, ToolRegistryEntry, SystemMetrics, RunSummary } from '../types';
+import type { CreateRunRequest, MutationResponse, PatchPage, ResetResponse, RunSummary, SystemMetrics, ToolRegistryEntry } from '../types';
+import { parsePatchPage } from '../state/patchState.ts';
 
-const API_BASE = import.meta.env.VITE_ORCHESTRATOR_URL || 'http://127.0.0.1:8000';
+const configuredBase = import.meta.env?.VITE_ORCHESTRATOR_URL;
+const DEFAULT_BASE = configuredBase ? configuredBase.replace(/\/$/, '') : '/api';
 
-export async function fetchRegistry(): Promise<{ tools: ToolRegistryEntry[]; version: string }> {
-  const res = await fetch(`${API_BASE}/registry`);
-  if (!res.ok) throw new Error(`Failed to load registry: ${res.statusText}`);
-  return res.json();
+export class ApiError extends Error {
+  constructor(public status: number | null, message: string) { super(message); }
 }
 
-export async function fetchMetrics(): Promise<SystemMetrics> {
-  const res = await fetch(`${API_BASE}/metrics`);
-  if (!res.ok) throw new Error(`Failed to load metrics: ${res.statusText}`);
-  return res.json();
-}
+export class DriftGuardApiClient {
+  constructor(public readonly base = DEFAULT_BASE, private readonly request = fetch) {}
 
-export async function fetchPatches(): Promise<any> {
-  const res = await fetch(`${API_BASE}/patches`);
-  if (!res.ok) throw new Error(`Failed to load patches: ${res.statusText}`);
-  return res.json();
-}
-
-export async function triggerRun(mode: 'normal' | 'healing', task: string): Promise<RunSummary> {
-  const res = await fetch(`${API_BASE}/runs`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode, task }),
-  });
-  if (!res.ok) throw new Error(`Failed to trigger run: ${res.statusText}`);
-  return res.json();
-}
-
-export async function resetDemo(): Promise<any> {
-  const res = await fetch(`${API_BASE}/demo/reset`, { method: 'POST' });
-  if (!res.ok) throw new Error(`Failed to reset demo: ${res.statusText}`);
-  return res.json();
-}
-
-export function subscribeToEvents(
-  runId: string,
-  onEvent: (event: RunEvent) => void,
-  onDone?: () => void,
-  onError?: (message: string) => void
-): () => void {
-  const eventSource = new EventSource(`${API_BASE}/runs/${runId}/events`);
-
-  eventSource.onmessage = (e) => {
-    try {
-      const event: RunEvent = JSON.parse(e.data);
-      onEvent(event);
-      if (event.type === 'run_completed' || event.type === 'run_failed') {
-        eventSource.close();
-        onDone?.();
-      }
-    } catch (err) {
-      console.error('Error parsing SSE event data:', err);
-      onError?.('A backend event could not be parsed.');
+  private async json<T>(path: string, init?: RequestInit): Promise<T> {
+    let response: Response;
+    try { response = await this.request(`${this.base}${path}`, init); }
+    catch { throw new ApiError(null, 'Cannot connect to the orchestrator. Start the backend and check the frontend proxy or VITE_ORCHESTRATOR_URL.'); }
+    let body: unknown;
+    try { body = await response.json(); } catch { body = null; }
+    if (!response.ok) {
+      const detail = body && typeof body === 'object' && 'detail' in body ? String(body.detail) : response.statusText;
+      const message = response.status === 409 ? 'Another backend operation is active.'
+        : response.status === 502 ? 'Downstream service unavailable or demo state unknown; reset the backend.'
+        : response.status >= 500 ? 'Backend request failed.' : detail || 'Backend request failed.';
+      throw new ApiError(response.status, `${response.status} ${message}`);
     }
-  };
+    if (!body || typeof body !== 'object') throw new ApiError(response.status, 'Backend returned an invalid JSON response.');
+    return body as T;
+  }
 
-  eventSource.onerror = (err) => {
-    console.warn('SSE event stream closed or interrupted:', err);
-    eventSource.close();
-    onError?.('The backend event stream was interrupted. Final run status is unavailable.');
-    onDone?.();
-  };
-
-  return () => {
-    eventSource.close();
-  };
+  async createRun(payload: CreateRunRequest): Promise<RunSummary> {
+    const run = await this.json<RunSummary>('/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    if (typeof run.run_id !== 'string' || !run.run_id || !['running', 'completed', 'failed', 'interrupted'].includes(run.status))
+      throw new ApiError(null, 'Backend returned an invalid run identifier or status.');
+    return run;
+  }
+  async getRun(runId: string): Promise<RunSummary> {
+    const run = await this.json<RunSummary>(`/runs/${encodeURIComponent(runId)}`);
+    if (run.run_id !== runId || !['running', 'completed', 'failed', 'interrupted'].includes(run.status))
+      throw new ApiError(null, 'Backend returned a mismatched or invalid run summary.');
+    return run;
+  }
+  eventUrl(runId: string, cursor?: number): string { return `${this.base}/runs/${encodeURIComponent(runId)}/events${cursor === undefined ? '' : `?cursor=${cursor}`}`; }
+  resetDemo(): Promise<ResetResponse> { return this.json('/demo/reset', { method: 'POST' }); }
+  setMutation(scenario: string, enabled = true): Promise<MutationResponse> {
+    return this.json('/demo/mutation', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scenario, enabled, evidence_level: 'ordinary' }) });
+  }
+  async fetchRegistry(): Promise<{ tools: ToolRegistryEntry[]; version: string }> {
+    const response = await this.json<{ tools: ToolRegistryEntry[]; version: string }>('/registry');
+    if (!Array.isArray(response.tools) || typeof response.version !== 'string' || response.tools.some((tool) =>
+      !tool || typeof tool.name !== 'string' || typeof tool.version !== 'string' || typeof tool.fingerprint !== 'string' ||
+      typeof tool.method !== 'string' || typeof tool.endpoint !== 'string' || !tool.argument_schema ||
+      !tool.argument_schema.properties || typeof tool.argument_schema.properties !== 'object'))
+      throw new ApiError(null, 'Backend returned an invalid active registry response.');
+    return response;
+  }
+  async fetchPatches(limit = 100, offset = 0): Promise<PatchPage> {
+    return parsePatchPage(await this.json(`/patches?limit=${limit}&offset=${offset}`));
+  }
+  fetchMetrics(): Promise<SystemMetrics> { return this.json('/metrics'); }
 }
+
+export const api = new DriftGuardApiClient();
