@@ -620,7 +620,8 @@ async def test_invalid_structured_output_provider_error_and_timeout():
     diag2 = LLMDiagnoser(model=ErrorModel())
     res2 = await diag2.diagnose(tool, obs, classify_failure(obs))
     assert res2.status == PlanningStatus.INSUFFICIENT_EVIDENCE
-    assert "Provider connection reset" in res2.reasons[0]
+    assert res2.reasons[0] == "Model provider request failed (provider error)."
+    assert "connection reset" not in res2.reasons[0].lower()
 
     # 3. Timeout
     class SlowModel:
