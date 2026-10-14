@@ -41,6 +41,7 @@ from orchestrator.models.classification import ClassificationResult, SemanticFai
 from orchestrator.models.proposal import PlanningStatus, PlannedOperation, PlanningResult
 from orchestrator.execution.events import redact_secrets
 from orchestrator.healing.validator import _is_lossless_integer_conversion
+from orchestrator.agents.model_provider import provider_error_summary
 
 
 MAX_EVIDENCE_PACKET_CHARS = 4000
@@ -94,13 +95,16 @@ def build_evidence_packet(
     elif isinstance(observation.response_evidence, dict):
         body = observation.response_evidence.get("body", {})
         if isinstance(body, dict):
-            clean_details = redact_secrets(body.get("error", {}).get("details", {}))
+            error_body = body.get("error")
+            if isinstance(error_body, dict):
+                clean_details = redact_secrets(error_body.get("details", {}))
 
     hint_text = None
     if isinstance(observation.response_evidence, dict):
         body = observation.response_evidence.get("body", {})
         if isinstance(body, dict):
-            hint_text = body.get("hint") or body.get("error", {}).get("hint")
+            error_body = body.get("error")
+            hint_text = body.get("hint") or (error_body.get("hint") if isinstance(error_body, dict) else None)
 
     observed_evidence = {
         "http_status": observation.http_status,
@@ -276,7 +280,7 @@ class LLMDiagnoser:
                 tool_name=snapshot.name,
                 base_version=snapshot.version,
                 base_fingerprint=base_fingerprint,
-                reasons=[f"LLM model invocation failed: {str(exc)}"],
+                reasons=[provider_error_summary(exc)],
                 source="llm_assisted",
             )
 

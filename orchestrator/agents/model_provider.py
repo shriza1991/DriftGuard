@@ -22,6 +22,28 @@ class ModelConfigurationError(Exception):
     pass
 
 
+def provider_error_summary(exc: Exception) -> str:
+    """Return an actionable provider category without echoing request URLs or keys."""
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    name = type(exc).__name__.lower()
+    detail = str(exc).lower()
+    if status == 401 or "unauthenticated" in name or "invalid api key" in detail:
+        category = "authentication"
+    elif status == 403 or "permission" in name or "permission denied" in detail:
+        category = "permission"
+    elif status == 429 or "resourceexhausted" in name or "quota" in detail or "rate limit" in detail:
+        category = "quota or rate limit"
+    elif status == 404 or "notfound" in name or "model not found" in detail:
+        category = "model unavailable"
+    elif "timeout" in name or "deadline" in detail:
+        category = "timeout"
+    elif "connection" in name or "network" in name or "dns" in detail:
+        category = "network"
+    else:
+        category = "provider error"
+    return f"Model provider request failed ({category})."
+
+
 def create_chat_model(
     override_model: Optional[BaseChatModel] = None,
     provider: Optional[str] = None,

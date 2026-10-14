@@ -35,7 +35,7 @@ from orchestrator.registry import VersionedToolRegistry
 from orchestrator.execution.tool_executor import ToolExecutor
 from orchestrator.execution.events import event_broadcaster, EventBroadcaster
 from orchestrator.agents.catalogue import get_langchain_tool_specs
-from orchestrator.agents.model_provider import create_chat_model, ModelConfigurationError
+from orchestrator.agents.model_provider import create_chat_model, ModelConfigurationError, provider_error_summary
 from orchestrator.healing.recovery import RecoveryController, RecoveryResult, RecoveryStatus
 from orchestrator.healing.llm_diagnosis import LLMDiagnoser
 from orchestrator.metrics.tracker import metrics_tracker
@@ -53,7 +53,7 @@ class HealingAgent:
         recovery_controller: Optional[RecoveryController] = None,
         max_turns: int = 5,
         max_tool_calls: int = 10,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = 90.0,
         approved_header_credentials: Optional[Dict[str, str]] = None,
         execution_guarantees: Optional[Dict[str, Any]] = None,
         audit_store: Optional[Any] = None,
@@ -264,7 +264,7 @@ class HealingAgent:
                 break
             except Exception as e:
                 termination_reason = "model_invocation_error"
-                run_record["error"] = f"Model call failed on turn {turns_executed}: {e}"
+                run_record["error"] = f"Model call failed on turn {turns_executed}: {provider_error_summary(e)}"
                 break
 
             # Aggregate usage metrics truthfully

@@ -318,3 +318,7 @@ Update shared contracts after coordination for current async `POST /runs`, mutat
 - In-app browser checks exercised live normal/combined/reuse cards, request diff, registry/audit, operational metrics, rapid double-click, busy controls, credential redaction, and 1366×768/390×844 layouts. Browser-side forced live disconnection/reconnection, validated-but-uncommitted candidate and failed retry were **not tested** end to end.
 
 **Phase 5 verdict: NOT READY for the complete requested demonstration.** The deterministic explicit-hint normal, recovery, registry reuse and safe-stop observations are live and presentable; model-driven baseline/comparison and authoritative safe-refusal/benchmark evidence are unresolved backend dependencies.
+
+### Model-provider update (14 October 2026)
+
+The model-configuration portion of the Phase 5 verdict above has since changed. A real Gemini request, structured `find_user` call, full model-driven normal workflow (`run-ea03b866`), explicit-hint rename healing (`run-43d97471`), and no-reset model reuse (`run-25c58eff`) were verified in an isolated local demo. See `docs/INTEGRATION.md` for sanitized evidence and startup details. A controlled paired comparison, authoritative unsafe-refusal result and published benchmark remain outstanding. Ordinary-evidence model diagnosis was not verified: after a parser repair, the final bounded attempt received a provider quota/rate-limit error. Do not treat this update as a passed benchmark or an ordinary-evidence healing result.

@@ -35,7 +35,7 @@ from orchestrator.client.mock_client import MockBusinessApiClient, redact_secret
 from orchestrator.execution.tool_executor import ToolExecutor
 from orchestrator.execution.events import event_broadcaster
 from orchestrator.agents.catalogue import get_frozen_v1_catalogue, get_langchain_tool_specs
-from orchestrator.agents.model_provider import create_chat_model, ModelConfigurationError
+from orchestrator.agents.model_provider import create_chat_model, ModelConfigurationError, provider_error_summary
 from orchestrator.metrics.tracker import metrics_tracker
 from orchestrator.audit.logger import audit_logger
 
@@ -49,7 +49,7 @@ class BaselineAgent:
         model: Optional[BaseChatModel] = None,
         max_turns: int = 5,
         max_tool_calls: int = 10,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = 90.0,
         audit_store: Optional[Any] = None,
     ):
         self._client = client
@@ -197,6 +197,7 @@ class BaselineAgent:
         total_input_tokens = 0
         total_output_tokens = 0
         has_token_usage = True
+        provider_error: Optional[str] = None
 
         turn = 0
         total_tool_calls_executed = 0
@@ -219,7 +220,8 @@ class BaselineAgent:
                 termination_reason = "deadline_exceeded"
                 break
             except Exception as e:
-                termination_reason = f"model_error: {str(e)}"
+                termination_reason = "model_invocation_error"
+                provider_error = provider_error_summary(e)
                 break
 
             # Aggregate usage metrics truthfully without double-counting
@@ -591,7 +593,7 @@ class BaselineAgent:
             metrics_tracker.record_run(mode="normal", success=True, duration_ms=duration_ms)
             audit_logger.log(action="baseline_completed", actor="baseline_agent", details=outcome)
         else:
-            failure_reason = verification_error or f"Baseline execution terminated with reason: {termination_reason}"
+            failure_reason = provider_error or verification_error or f"Baseline execution terminated with reason: {termination_reason}"
             run_record["error"] = failure_reason
             event_broadcaster.publish_event(
                 run_id=run_id,
