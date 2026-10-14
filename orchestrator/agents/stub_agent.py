@@ -1,11 +1,7 @@
-"""Model provider and Agent bindings (Member 2 Scope).
+"""Legacy provider metadata scaffold; not used by model-driven run execution.
 
-Configurable single provider supporting:
-- mock (deterministic fallback for testing)
-- gemini (Google GenAI)
-- openai (OpenAI GPT-4o / compatible)
-
-In this initial foundation, tool calling executes deterministically via the registry.
+Model-driven runs construct BaselineAgent or HealingAgent and obtain a real model
+through create_chat_model. The explicit deterministic execution type is separate.
 """
 from typing import Dict, Any, List, Optional
 from orchestrator.config import settings

@@ -1,6 +1,8 @@
 """Configuration compatibility and safe provider error reporting."""
 
-from orchestrator.agents.model_provider import provider_error_summary
+import pytest
+
+from orchestrator.agents.model_provider import ModelConfigurationError, create_chat_model, provider_error_summary
 from orchestrator.config import OrchestratorSettings
 from orchestrator.healing.llm_diagnosis import build_evidence_packet
 from orchestrator.models.observation import ExecutionPhase, FailureObservation
@@ -45,3 +47,29 @@ def test_diagnosis_evidence_accepts_string_error_body():
     )
     packet = build_evidence_packet(tool, observation, {})
     assert "user_id was renamed to assignee_id" in packet
+
+
+def test_groq_key_loads_from_backend_dotenv_without_repr(tmp_path, monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    config = tmp_path / "local.env"
+    config.write_text("ORCHESTRATOR_MODEL_PROVIDER=groq\nGROQ_API_KEY=test-only-placeholder\n")
+    loaded = OrchestratorSettings(_env_file=config)
+    assert loaded.model_provider == "groq"
+    assert loaded.groq_api_key == "test-only-placeholder"
+    assert "test-only-placeholder" not in repr(loaded)
+
+
+def test_groq_client_uses_explicit_key_and_tool_capable_model():
+    model = create_chat_model(provider="groq", model_name="openai/gpt-oss-120b", api_key="test-only-placeholder")
+    assert type(model).__name__ == "ChatGroq"
+    assert model.model_name == "openai/gpt-oss-120b"
+
+
+def test_groq_missing_key_does_not_use_gemini_key(monkeypatch):
+    import orchestrator.agents.model_provider as module
+
+    monkeypatch.setattr(module.settings, "groq_api_key", None)
+    monkeypatch.setattr(module.settings, "model_api_key", "gemini-test-only-placeholder")
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    with pytest.raises(ModelConfigurationError, match="GROQ_API_KEY"):
+        create_chat_model(provider="groq")

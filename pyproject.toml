@@ -25,6 +25,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+groq = ["langchain-groq>=1.1,<2"]
 gemini = ["langchain-google-genai>=2.0"]
 openai = ["langchain-openai>=0.2"]
 dev = [
