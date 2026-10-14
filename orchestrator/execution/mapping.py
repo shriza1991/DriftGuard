@@ -36,7 +36,7 @@ def validate_request_mapping(request_mapping: Dict[str, Any]) -> None:
         )
 
 
-def expand_mapping(template_obj: Any, arguments: Dict[str, Any]) -> Any:
+def expand_mapping(template_obj: Any, arguments: Dict[str, Any], target_key: Any = None) -> Any:
     """Recursively expands template placeholders from arguments without eval.
     
     If template_obj is exactly '{field_name}', the native python type of arguments[field_name]
@@ -44,24 +44,51 @@ def expand_mapping(template_obj: Any, arguments: Dict[str, Any]) -> Any:
     If template_obj is a composite string like 'prefix_{field}_suffix', string substitution is performed.
     """
     if isinstance(template_obj, dict):
-        return {k: expand_mapping(v, arguments) for k, v in template_obj.items()}
+        return {k: expand_mapping(v, arguments, target_key=k) for k, v in template_obj.items()}
     elif isinstance(template_obj, list):
-        return [expand_mapping(item, arguments) for item in template_obj]
+        return [expand_mapping(item, arguments, target_key=target_key) for item in template_obj]
     elif isinstance(template_obj, str):
         # Exact single placeholder: "{arg_name}"
         if template_obj.startswith("{") and template_obj.endswith("}") and template_obj.count("{") == 1 and template_obj.count("}") == 1:
             var_name = template_obj[1:-1]
-            if var_name not in arguments:
-                raise MappingError(f"Missing required argument '{var_name}' for template '{template_obj}'")
-            return arguments[var_name]
+            if var_name in arguments:
+                return arguments[var_name]
+            elif "." in var_name:
+                parts = var_name.split(".")
+                curr = arguments
+                for p in parts:
+                    if isinstance(curr, dict) and p in curr:
+                        curr = curr[p]
+                    else:
+                        curr = None
+                        break
+                if curr is not None:
+                    return curr
+            # Target key fallback (e.g. wire key renamed/nested and caller provided updated key)
+            if target_key and str(target_key) in arguments:
+                return arguments[str(target_key)]
+            raise MappingError(f"Missing required argument '{var_name}' for template '{template_obj}'")
         elif "{" in template_obj and "}" in template_obj:
             # Composite template string
-            matches = re.findall(r"\{([a-zA-Z0-9_]+)\}", template_obj)
+            matches = re.findall(r"\{([a-zA-Z0-9_\.]+)\}", template_obj)
             res_str = template_obj
             for m in matches:
-                if m not in arguments:
+                val = None
+                if m in arguments:
+                    val = arguments[m]
+                elif "." in m:
+                    parts = m.split(".")
+                    curr = arguments
+                    for p in parts:
+                        if isinstance(curr, dict) and p in curr:
+                            curr = curr[p]
+                        else:
+                            curr = None
+                            break
+                    val = curr
+                if val is None:
                     raise MappingError(f"Missing argument '{m}' for composite template '{template_obj}'")
-                res_str = res_str.replace(f"{{{m}}}", str(arguments[m]))
+                res_str = res_str.replace(f"{{{m}}}", str(val))
             return res_str
         else:
             return template_obj

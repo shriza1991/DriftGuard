@@ -180,19 +180,40 @@
   - Targeted Test Suite (`tests/healing/test_safety_validator.py`): 20 comprehensive unit tests covering valid proposals, tampered fingerprints, forged evidence, diverging previews, stale versions, destination collisions, leading zeros, decimal truncation, bool-as-int, nonnumeric strings, missing credentials, secret leakage, uncertain writes, response drift repeat write prevention, inputs/registry immutability, and event envelopes.
   - Full Regression Verification: All 103 backend tests passing cleanly.
 
-- [ ] **Task 8: Staged Patch & Verified Recovery Execution (`orchestrator/healing/recovery.py`)**:
-  - Stage the authorized patch in memory with per-tool lock.
-  - Execute exactly ONE retry call with idempotency key.
-  - If retry succeeds, perform independent read verification via `GET /tickets/81`.
-  - Discard candidate patch if retry or read verification fails.
+- [x] **Task 8: Bounded Recovery and Registry Commit (`orchestrator/healing/recovery.py`, `orchestrator/agents/healing.py`)**:
+  - Task 7 Blocker Fixes:
+    - Pre-execution rejection enforcement: HTTP 400/401/403/422 status alone strictly blocks recovery unless explicit trusted endpoint guarantees or execution details confirm pre-mutation rejection.
+    - Semantic evidence support: Dot-notated/nested fields and expected types are resolved directly against observation structures.
+    - Evidenced numeric semantics: String-to-integer conversion requires verified numeric semantics plus lossless representation.
+    - Coherent schema and mapping updates: Model-visible arguments, required fields, and executor wire mappings updated synchronously.
+  - Recovery Controller Architecture (`RecoveryController`):
+    - Full dependency injection: registry, executor, planner, validator, verifier, event broadcaster, credentials resolver, and execution guarantees.
+    - Strict eligibility gating: Non-diagnosis eligible failures, uncertain writes, and unverified status-only rejections strictly blocked.
+    - Monotonic version locking: Re-entrant per-tool lock acquired within remaining timeout budget; validates active version and fingerprint before execution.
+    - Loop termination: Tracks attempted proposal fingerprints per operation identity; zero infinite retry loops.
+    - Bounded execution: Exactly ONE repaired HTTP call executed with candidate snapshot and transformed arguments using stable idempotency keys.
+    - Independent verification: Executes `get_ticket` read check asserting both requested ticket ID and intended assignee using identity equivalence (`str(actual) == str(expected)`). Verification is read-only and never invokes recursive healing.
+    - Atomic version-checked commit: Calls `commit_candidate` with expected base version only AFTER verification succeeds; staged candidates discarded on failure or timeout.
+    - Truthful outcome separation: If repaired write succeeds but verification/commit fails, records separate business vs registry outcomes; never claims write rollback.
+  - Genuine Healing Agent Integration (`HealingAgent`):
+    - Supplies active registry definitions to LangChain ChatModel with dynamic tool bindings.
+    - Intercepts supported runtime tool failures through the recovery controller.
+    - Pairs recovered outcomes with original model `tool_call_id`.
+    - Automatically refreshes model bindings from newly committed registry contracts before next turn.
+    - Subsequent runs share the application registry and execute committed contracts with zero diagnosis tokens.
+  - Contract-Compatible Event Flow:
+    - Emits `diagnosis_started`, `patch_proposed`, `patch_validated`, `retry_started`, `recovery_verified`, `registry_committed`, and terminal events strictly matching `contracts/events.schema.json`.
+    - `recovery_verified` emitted strictly after actual read verification; `registry_committed` emitted strictly after atomic registry activation.
+  - Targeted Test Suite (`tests/healing/test_recovery.py`): 14 comprehensive unit tests verifying rename, nesting, type conversion, approved header, status-only rejection blocking, uncertain write prevention, single retry bound, verification mismatch handling, staged candidate cleanup, loop prevention, stale recovery skips, model binding refresh, frozen baseline preservation, and truthful contract-compliant events.
+  - Full Regression Verification: All 119 backend tests passing cleanly.
 
-- [ ] **Task 9: Registry Hot-Commit & Second-Call Reuse**:
-  - Hot-commit verified patch into active tool registry.
-  - Verify that subsequent calls to `assign_ticket` in future runs automatically reuse the updated contract without reparsing or re-diagnosing.
+- [ ] **Task 9: LLM-Assisted Diagnosis (`orchestrator/healing/llm_diagnosis.py`)**:
+  - Integrate LLM fallback for ambiguous failures where deterministic heuristic returns insufficient evidence.
+  - Authorize proposed patches strictly through deterministic `SafetyValidator`.
 
-- [ ] **Task 10: Audit & Token Tracking**:
-  - Log every diagnosis step and patch commit into `orchestrator/audit/logger.py`.
-  - Track real model tokens used during repair planning.
+- [ ] **Task 10: Persistent Audit & Aggregate Metrics (`orchestrator/audit/`, `orchestrator/metrics/`)**:
+  - Persistent SQLite storage for audit entries and benchmark metrics.
+  - Token tracking and adaptation rate calculations.
 
 ---
 

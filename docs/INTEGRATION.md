@@ -504,5 +504,149 @@ Event schemas for validation decisions emitted over `/runs/{run_id}/events`:
 }
 ```
 
+---
+
+## 11. Bounded Recovery Controller & Registry Commit (Member 2 Task 8)
+
+### 11.1 RecoveryController Architecture & API
+The `RecoveryController` (`orchestrator/healing/recovery.py`) coordinates the complete self-healing lifecycle upon runtime tool failure:
+
+```python
+from orchestrator.healing.recovery import RecoveryController
+
+controller = RecoveryController(
+    registry=registry,                               # VersionedToolRegistry
+    executor=executor,                               # ToolExecutor
+    planner=plan_repair,                             # Proposal formulation engine
+    validator=validate_repair_proposal,              # Independent deterministic validator
+    verifier=default_verify_business_intent,         # Read-only verification engine
+    event_broadcaster=broadcaster,                   # Typed SSE event publisher
+    approved_header_credentials={"Authorization": "secops_auth"},
+    credential_resolver=resolver,
+    execution_guarantees={"pre_execution_rejection": True},
+)
+
+# Intercept failed execution
+res = await controller.recover_failure(
+    observation=observation,                         # FailureObservation
+    original_arguments={"ticket_id": 81, "user_id": "123"},
+    operation_identity=op_identity,
+    run_id="run-b8f2c19a",
+    deadline=15.0,                                   # Total remaining timeout budget
+    mode="healing",
+)
+```
+
+### 11.2 Bounded Recovery Sequence
+1. **Eligibility Gate**: Only diagnosis-eligible failures proceed. Uncertain writes (`uncertain_write=True`) and status-only rejections lacking pre-execution rejection guarantees are strictly rejected before any lock acquisition or network traffic.
+2. **Lock Acquisition & Freshness Verification**:
+   - Acquires the per-tool reentrant lock (`AsyncRLock`) within the remaining deadline.
+   - Inspects active tool version and fingerprint. If the registry already advanced while waiting for the lock, speculative execution is skipped (`RecoveryStatus.STALE_SKIPPED`).
+3. **Deterministic Planning & Safety Validation**:
+   - Formulates pure repair proposal from observed runtime evidence.
+   - Evaluates attempted proposal fingerprint against `_attempted_proposals[operation_identity]` to terminate recovery loops.
+   - Independently validates proposal with `validate_repair_proposal`.
+4. **Candidate Staging**:
+   - Stages defensively isolated candidate via `registry.stage_candidate()`. Active tools and history remain untouched.
+5. **Single Repaired Execution**:
+   - Emits `retry_started`.
+   - Executes exactly **ONE** HTTP call with candidate snapshot, transformed arguments, and stable `Idempotency-Key`.
+   - Halts immediately on failure or uncertain write.
+6. **Independent Business Intent Verification**:
+   - Performs read-only call to `get_ticket(81)` without mutating locks.
+   - Compares requested ticket ID and intended assignee using identity equivalence (`str(actual) == str(expected)`).
+   - Emits `recovery_verified` ONLY upon confirmed match.
+7. **Atomic Registry Commit**:
+   - Calls `registry.commit_candidate(candidate_id, expected_base_version)`.
+   - Advances active version (`1.0.0` -> `1.1.0`), archives v1.0.0 into history, and emits `registry_committed`.
+8. **Candidate Cleanup**:
+   - Discards staged candidates in `finally` block on any failure, timeout, or cancellation. Releases locks cleanly.
+
+### 11.3 Truthful Outcome Reporting
+If an adapted HTTP write succeeds on the downstream server but subsequent verification or registry commit encounters an error:
+- DriftGuard records: `business_effect_occurred=True`, `verification_succeeded=False`, `registry_committed=False`.
+- Never reports that the write was rolled back or tries to re-execute it.
+- Prevents double-assignment or inconsistent audit logs.
+
+### 11.4 Dynamic Model Refresh
+In genuine model-driven healing mode (`HealingAgent` in `orchestrator/agents/healing.py`):
+1. The agent intercepts tool failures and invokes `RecoveryController`.
+2. The recovered execution result is paired with the original model's `tool_call_id`.
+3. Before the next model invocation, the agent queries `registry.list_active()` and dynamically calls `active_model.bind_tools(tool_specs)`.
+4. Subsequent turns and subsequent runs utilize the committed contract directly with zero diagnostic overhead.
+
+---
+
+### 11.5 Cross-Member Handoffs (Task 8)
+
+#### For Member 1 (Mock API Guarantees & Missing Evidence):
+1. **Pre-Execution Rejection Guarantee**:
+   - HTTP 400, 401, 403, and 422 status codes alone **never** authorize write retries in DriftGuard unless:
+     - The endpoint configuration provides an explicit guarantee (`pre_execution_rejection: true`), or
+     - The response payload explicitly includes `details.pre_execution_rejection: true`.
+   - Downstream mock mutations must ensure invalid requests are rejected before applying state changes, or provide this explicit guarantee.
+2. **Lossless Type Equivalence**:
+   - When converting string `user_id` to integer `123`, `GET /tickets/{id}` will return `assignee_id: 123` (or `"123"`). DriftGuard accepts identity equivalence (`str(actual) == str(expected)`).
+
+#### For Member 3 (Frontend & SSE Events):
+Event schemas for recovery execution, verification, and commit emitted over `/runs/{run_id}/events`:
+
+- **`retry_started` Event**:
+```json
+{
+  "run_id": "run-b8f2c19a",
+  "sequence": 6,
+  "timestamp": "2026-10-14T12:00:01.350Z",
+  "mode": "healing",
+  "type": "retry_started",
+  "tool": "assign_ticket",
+  "data": {
+    "tool": "assign_ticket",
+    "candidate_id": "cand-9f8a12bc",
+    "candidate_version": "1.1.0",
+    "proposal_fingerprint": "b4f2c8d19a02ec71",
+    "attempt": 1
+  }
+}
+```
+
+- **`recovery_verified` Event**:
+```json
+{
+  "run_id": "run-b8f2c19a",
+  "sequence": 7,
+  "timestamp": "2026-10-14T12:00:01.620Z",
+  "mode": "healing",
+  "type": "recovery_verified",
+  "tool": "assign_ticket",
+  "data": {
+    "tool": "assign_ticket",
+    "candidate_id": "cand-9f8a12bc",
+    "verified_ticket_id": 81,
+    "verified_assignee_id": "123",
+    "verification_method": "independent_read:get_ticket"
+  }
+}
+```
+
+- **`registry_committed` Event**:
+```json
+{
+  "run_id": "run-b8f2c19a",
+  "sequence": 8,
+  "timestamp": "2026-10-14T12:00:01.710Z",
+  "mode": "healing",
+  "type": "registry_committed",
+  "tool": "assign_ticket",
+  "data": {
+    "tool": "assign_ticket",
+    "candidate_id": "cand-9f8a12bc",
+    "base_version": "1.0.0",
+    "committed_version": "1.1.0",
+    "committed_fingerprint": "8f391c4d92a104e6"
+  }
+}
+```
+
 
 

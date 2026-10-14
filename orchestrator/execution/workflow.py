@@ -337,37 +337,41 @@ class WorkflowExecutionManager:
                         data=event_data_2,
                     )
 
-                    if mode == "healing":
-                        event_broadcaster.publish_event(
+                    if mode == "healing" and res_2.failure_observation:
+                        from orchestrator.healing.recovery import RecoveryController
+                        rec_ctrl = RecoveryController(
+                            registry=active_registry,
+                            executor=executor,
+                            event_broadcaster=event_broadcaster,
+                            approved_header_credentials={"Authorization": "secops_auth"},
+                            execution_guarantees={"pre_execution_rejection": True},
+                        )
+                        recovery_res = await rec_ctrl.recover_failure(
+                            observation=res_2.failure_observation,
+                            original_arguments=assign_args,
+                            operation_identity=res_2.operation_identity or res_2.failure_observation.operation_identity,
                             run_id=run_id,
-                            event_type="diagnosis_started",
-                            mode=mode,
-                            tool="assign_ticket",
-                            data={"observed_status": status_code, "message": "Analyzing runtime failure evidence..."},
+                            deadline=30.0,
+                            mode="healing",
                         )
-                        healing_result = await healing_engine.attempt_healing(
-                            tool_name="assign_ticket",
-                            failed_arguments=assign_args,
-                            error_details=res_2.failure.raw_details if res_2.failure else {},
-                        )
-                        event_broadcaster.publish_event(
-                            run_id=run_id,
-                            event_type="run_failed",
-                            mode=mode,
-                            tool="assign_ticket",
-                            data={
-                                "reason": "Autonomous healing pipeline pending Member 2 implementation.",
-                                "status": healing_result.status,
-                                "notice": healing_result.message,
-                            },
-                        )
-                        duration_ms = round((time.time() - start_time) * 1000, 2)
-                        run_record["status"] = "failed"
-                        run_record["completed_at"] = datetime.now(timezone.utc).isoformat()
-                        run_record["duration_ms"] = duration_ms
-                        run_record["error"] = healing_result.message
-                        metrics_tracker.record_run(mode=mode, success=False, duration_ms=duration_ms)
-                        return run_record
+                        if recovery_res.recovered and recovery_res.execution_result:
+                            res_2 = recovery_res.execution_result
+                        else:
+                            duration_ms = round((time.time() - start_time) * 1000, 2)
+                            err_reason = recovery_res.termination_reason or "Recovery failed"
+                            event_broadcaster.publish_event(
+                                run_id=run_id,
+                                event_type="run_failed",
+                                mode=mode,
+                                tool="assign_ticket",
+                                data={"reason": err_reason, "duration_ms": duration_ms},
+                            )
+                            run_record["status"] = "failed"
+                            run_record["completed_at"] = datetime.now(timezone.utc).isoformat()
+                            run_record["duration_ms"] = duration_ms
+                            run_record["error"] = err_reason
+                            metrics_tracker.record_run(mode=mode, success=False, duration_ms=duration_ms)
+                            return run_record
                     else:
                         event_broadcaster.publish_event(
                             run_id=run_id,

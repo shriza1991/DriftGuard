@@ -66,6 +66,15 @@ async def create_run(request: CreateRunRequest, req: Request):
             client=app_client,
         )
         workflow_manager._runs_store[run_id] = result
+    elif request.execution_type == "model_driven_healing":
+        from orchestrator.agents.healing import HealingAgent
+        agent = HealingAgent(registry=app_registry, client=app_client)
+        result = await agent.execute_workflow(
+            run_id=run_id,
+            task=request.task,
+            client=app_client,
+        )
+        workflow_manager._runs_store[run_id] = result
     else:
         result = await workflow_manager.execute_workflow(
             run_id=run_id,

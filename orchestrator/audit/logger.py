@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 
 
@@ -22,6 +22,26 @@ class AuditLogger:
             details=details
         )
         self._entries.append(entry)
+
+    def record(
+        self,
+        run_id: str,
+        mode: str,
+        status: str,
+        outcome: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None
+    ):
+        self.log(
+            action=f"workflow_{status}",
+            actor=f"{mode}_agent",
+            details={
+                "run_id": run_id,
+                "mode": mode,
+                "status": status,
+                "outcome": outcome,
+                "error": error,
+            }
+        )
 
     def get_entries(self) -> List[AuditEntry]:
         return self._entries

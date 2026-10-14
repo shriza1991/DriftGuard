@@ -101,7 +101,20 @@ def _resolve_evidence_path(observation: FailureObservation, path_str: str) -> An
     if in_list:
         return observation.validation_details or body or {}
 
-    return None
+def _lookup_path(data: Any, path: str) -> Any:
+    """Safely traverses nested dictionaries using dot notation."""
+    if not isinstance(data, dict) or not path:
+        return None
+    if path in data:
+        return data[path]
+    parts = path.split(".")
+    curr = data
+    for p in parts:
+        if isinstance(curr, dict) and p in curr:
+            curr = curr[p]
+        else:
+            return None
+    return curr
 
 
 def _is_lossless_integer_conversion(val: Any) -> Tuple[bool, Optional[str]]:
@@ -293,32 +306,74 @@ def validate_repair_proposal(
             rejection_reasons.append(reason)
             checks.append(SafetyCheckRecord(check_name=f"evidence_resolution:{op.target_path}", passed=False, reason=reason, evidence_reference=ev_path))
         else:
-            # Verify evidence supports the operation
+            # Verify evidence supports the operation semantically
             if op.operation_type == RestrictedOperationType.RENAME_ARGUMENT:
-                # Expect migration_mapping or missing/unexpected in evidence
-                if isinstance(ev_val, dict) and op.source_path in ev_val:
-                    if ev_val[op.source_path] != op.target_path:
-                        reason = f"Migration mapping in evidence maps '{op.source_path}' to '{ev_val[op.source_path]}', but operation targets '{op.target_path}'."
-                        rejection_reasons.append(reason)
-                        checks.append(SafetyCheckRecord(check_name=f"evidence_support:{op.target_path}", passed=False, reason=reason))
-                    else:
-                        checks.append(SafetyCheckRecord(check_name=f"evidence_support:{op.target_path}", passed=True, evidence_reference=ev_path))
-                elif isinstance(ev_val, str) and (op.source_path in ev_val and op.target_path in ev_val):
-                    checks.append(SafetyCheckRecord(check_name=f"evidence_support:{op.target_path}", passed=True, evidence_reference=ev_path))
+                has_semantic_rename = False
+                if isinstance(ev_val, dict):
+                    if ev_val.get(op.source_path) == op.target_path or (ev_val.get("source") == op.source_path and ev_val.get("target") == op.target_path):
+                        has_semantic_rename = True
+                elif isinstance(ev_val, str):
+                    if op.source_path in ev_val and op.target_path in ev_val and any(kw in ev_val.lower() for kw in ["renamed", "deprecated", "expected", "instead of", "replaced", "migrated"]):
+                        has_semantic_rename = True
+
+                if not has_semantic_rename:
+                    reason = f"Evidence at '{ev_path}' does not semantically support renaming '{op.source_path}' to '{op.target_path}'."
+                    rejection_reasons.append(reason)
+                    checks.append(SafetyCheckRecord(check_name=f"evidence_support:{op.target_path}", passed=False, reason=reason))
                 else:
                     checks.append(SafetyCheckRecord(check_name=f"evidence_support:{op.target_path}", passed=True, evidence_reference=ev_path))
 
             elif op.operation_type == RestrictedOperationType.NEST_ARGUMENT:
-                # Nesting evidence check
-                checks.append(SafetyCheckRecord(check_name=f"evidence_support:{op.target_path}", passed=True, evidence_reference=ev_path))
+                has_semantic_nest = False
+                if isinstance(ev_val, dict):
+                    if ev_val.get(op.source_path) == op.target_path or (ev_val.get("source") == op.source_path and ev_val.get("target") == op.target_path):
+                        has_semantic_nest = True
+                elif isinstance(ev_val, str):
+                    if op.source_path in ev_val and op.target_path in ev_val and any(kw in ev_val.lower() for kw in ["nested", "migrated", "expected", "object"]):
+                        has_semantic_nest = True
+
+                if not has_semantic_nest:
+                    reason = f"Evidence at '{ev_path}' does not semantically support nesting '{op.source_path}' into '{op.target_path}'."
+                    rejection_reasons.append(reason)
+                    checks.append(SafetyCheckRecord(check_name=f"evidence_support:{op.target_path}", passed=False, reason=reason))
+                else:
+                    checks.append(SafetyCheckRecord(check_name=f"evidence_support:{op.target_path}", passed=True, evidence_reference=ev_path))
 
             elif op.operation_type == RestrictedOperationType.CAST_TYPE:
-                # Type change evidence check
-                checks.append(SafetyCheckRecord(check_name=f"evidence_support:{op.target_path}", passed=True, evidence_reference=ev_path))
+                has_type_ev = False
+                if isinstance(ev_val, dict):
+                    lookup_t = _lookup_path(ev_val, op.source_path or "") or _lookup_path(ev_val, op.target_path or "")
+                    if lookup_t is None:
+                        lookup_t = ev_val.get(op.source_path) or ev_val.get(op.target_path or "")
+                    if isinstance(lookup_t, str) and ("int" in lookup_t.lower() or "number" in lookup_t.lower() or "string" in lookup_t.lower()):
+                        has_type_ev = True
+                    elif isinstance(lookup_t, dict):
+                        for _, v in lookup_t.items():
+                            if isinstance(v, str) and ("int" in v.lower() or "number" in v.lower() or "string" in v.lower()):
+                                has_type_ev = True
+                elif isinstance(ev_val, str) and any(w in ev_val.lower() for w in ["integer", "int", "number", "string"]):
+                    has_type_ev = True
+
+                if not has_type_ev:
+                    reason = f"Evidence at '{ev_path}' does not semantically specify expected type for '{op.target_path or op.source_path}'."
+                    rejection_reasons.append(reason)
+                    checks.append(SafetyCheckRecord(check_name=f"evidence_support:{op.target_path}", passed=False, reason=reason))
+                else:
+                    checks.append(SafetyCheckRecord(check_name=f"evidence_support:{op.target_path}", passed=True, evidence_reference=ev_path))
 
             elif op.operation_type == RestrictedOperationType.SET_HEADER:
-                # Header requirement evidence check
-                checks.append(SafetyCheckRecord(check_name=f"evidence_support:{op.target_path}", passed=True, evidence_reference=ev_path))
+                has_hdr_ev = False
+                if isinstance(ev_val, list) and op.target_path in ev_val:
+                    has_hdr_ev = True
+                elif isinstance(ev_val, str) and op.target_path in ev_val:
+                    has_hdr_ev = True
+
+                if not has_hdr_ev:
+                    reason = f"Evidence at '{ev_path}' does not semantically require header '{op.target_path}'."
+                    rejection_reasons.append(reason)
+                    checks.append(SafetyCheckRecord(check_name=f"evidence_support:{op.target_path}", passed=False, reason=reason))
+                else:
+                    checks.append(SafetyCheckRecord(check_name=f"evidence_support:{op.target_path}", passed=True, evidence_reference=ev_path))
 
     # -------------------------------------------------------------------------
     # 5. Value Provenance, Conversion Allowlist & Argument Transformation
@@ -363,14 +418,39 @@ def validate_repair_proposal(
                 else:
                     src_val = original_arguments[src_key]
                     if policy in ("to_integer", "string_to_integer"):
-                        is_lossless, err_msg = _is_lossless_integer_conversion(src_val)
-                        if not is_lossless:
-                            reason = f"Lossy or disallowed conversion for field '{src_key}': {err_msg}"
+                        # Require evidenced numeric semantics: evidence must indicate integer/number
+                        ev_indicates_numeric = False
+                        ev_val = _resolve_evidence_path(observation, op.evidence_path)
+                        if isinstance(ev_val, dict):
+                            val_type = (
+                                _lookup_path(ev_val, src_key)
+                                or _lookup_path(ev_val, op.target_path or "")
+                                or ev_val.get(src_key)
+                                or ev_val.get(op.target_path or "")
+                            )
+                            if isinstance(val_type, str) and any(k in val_type.lower() for k in ("int", "number", "numeric")):
+                                ev_indicates_numeric = True
+                            elif isinstance(val_type, dict):
+                                for _, v in val_type.items():
+                                    if isinstance(v, str) and any(k in v.lower() for k in ("int", "number", "numeric")):
+                                        ev_indicates_numeric = True
+                        elif isinstance(ev_val, str) and any(k in ev_val.lower() for k in ("integer", "int", "number", "numeric")):
+                            ev_indicates_numeric = True
+
+                        if not ev_indicates_numeric:
+                            reason = f"Conversion to integer for '{src_key}' lacks evidenced numeric semantics in observation evidence."
                             rejection_reasons.append(reason)
-                            checks.append(SafetyCheckRecord(check_name=f"lossless_conversion:{src_key}", passed=False, reason=reason))
+                            checks.append(SafetyCheckRecord(check_name=f"numeric_semantics:{src_key}", passed=False, reason=reason))
                         else:
-                            transformed_args[src_key] = int(str(src_val).strip())
-                            checks.append(SafetyCheckRecord(check_name=f"lossless_conversion:{src_key}", passed=True))
+                            checks.append(SafetyCheckRecord(check_name=f"numeric_semantics:{src_key}", passed=True))
+                            is_lossless, err_msg = _is_lossless_integer_conversion(src_val)
+                            if not is_lossless:
+                                reason = f"Lossy or disallowed conversion for field '{src_key}': {err_msg}"
+                                rejection_reasons.append(reason)
+                                checks.append(SafetyCheckRecord(check_name=f"lossless_conversion:{src_key}", passed=False, reason=reason))
+                            else:
+                                transformed_args[src_key] = int(str(src_val).strip())
+                                checks.append(SafetyCheckRecord(check_name=f"lossless_conversion:{src_key}", passed=True))
                     elif policy in ("to_string", "integer_to_string"):
                         transformed_args[src_key] = str(src_val)
                         checks.append(SafetyCheckRecord(check_name=f"lossless_conversion:{src_key}", passed=True))
@@ -547,11 +627,22 @@ def validate_repair_proposal(
             retry_safety_reasons.append(reason)
             checks.append(SafetyCheckRecord(check_name="retry_safety_pre_execution", passed=False, reason=reason))
         elif observation.status_code in (400, 401, 403, 422):
-            # Pre-execution validation/auth rejection confirmed by downstream server
-            if guarantees.get("pre_execution_rejection", True):
+            # Pre-execution validation/auth rejection requires explicit trusted guarantee or evidence
+            has_trusted_guarantee = (
+                guarantees.get("pre_execution_rejection") is True
+                or (
+                    isinstance(observation.validation_details, dict)
+                    and observation.validation_details.get("pre_execution_rejection") is True
+                )
+            )
+            if has_trusted_guarantee:
                 checks.append(SafetyCheckRecord(check_name="retry_safety_pre_execution", passed=True))
             else:
-                reason = "Automated retry blocked: pre_execution_rejection is declared False in execution guarantees."
+                reason = (
+                    f"Automated retry blocked: HTTP status {observation.status_code} alone does not prove rejection "
+                    "before mutation without a trusted endpoint guarantee (guarantees['pre_execution_rejection']=True) "
+                    "or explicit trusted execution evidence in validation_details."
+                )
                 retry_safety_reasons.append(reason)
                 checks.append(SafetyCheckRecord(check_name="retry_safety_pre_execution", passed=False, reason=reason))
         else:

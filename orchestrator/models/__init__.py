@@ -119,6 +119,10 @@ class OperationIdentity(BaseModel):
     tool_call_id: Optional[str] = None
     run_id: Optional[str] = None
 
+    @property
+    def key(self) -> str:
+        return f"{self.tool_name}:{self.method.upper()}:{self.endpoint}"
+
 
 class TimingInfo(BaseModel):
     started_at: str
@@ -164,6 +168,14 @@ class ExecutionResult(BaseModel):
     operation_identity: OperationIdentity
     observation: Optional[FailureObservation] = None
     classification: Optional[ClassificationResult] = None
+
+    @property
+    def failure_observation(self) -> Optional[FailureObservation]:
+        return self.observation
+
+    @property
+    def result(self) -> Optional[Dict[str, Any]]:
+        return self.outcome or self.normalized_result
 
 
 class RestrictedOperationType(str, Enum):

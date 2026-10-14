@@ -165,6 +165,10 @@ class VersionedToolRegistry:
             for _, tool in sorted(self._active.items())
         ]
 
+    def list_tools(self) -> List[ToolDefinition]:
+        """Alias for list_active() returning defensive copies of all active tool definitions."""
+        return self.list_active()
+
     def get_version(self, tool_name: str, version: str) -> Optional[ToolDefinition]:
         """Looks up a specific active or historical version of a tool."""
         if tool_name not in self._active:

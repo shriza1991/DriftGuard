@@ -121,6 +121,24 @@
   2. Enforce strict write uncertainty protection: any observation with `uncertain_write=True` or an HTTP POST write returning 200/201 (response drift) is strictly denied retry authorization (`authorized_for_recovery = False`).
 - **Rationale**: Eliminates data corruption and duplicate side-effects on downstream services, ensuring safe recovery execution under Task 8.
 
+## ADR-024: Bounded Recovery Lifecycle and Independent Intent Verification
+- **Context**: Autonomous recovery execution must never enter infinite repair loops, overwrite newer registry versions, execute speculative unverified retries, or fabricate recovery claims.
+- **Decision**:
+  1. Enforce a single repair proposal and at most ONE repaired HTTP execution per failed invocation.
+  2. Guard same-tool recovery under a re-entrant asynchronous tool lock (`AsyncRLock`) and re-verify version and fingerprint freshness prior to staging. Stale observations abort speculative retries (`RecoveryStatus.STALE_SKIPPED`).
+  3. Track attempted proposal fingerprints per operation identity (`attempt_key = f"{op_id.key}:{proposal_fp}"`) to permanently terminate repair loops.
+  4. Perform independent read verification (`get_ticket`) prior to registry commit, checking requested ticket and intended assignee using identity equivalence (`str(actual) == str(expected)`).
+  5. Discard staged candidates on any execution failure, timeout, or cancellation.
+  6. Record separate business vs registry outcomes: if a write succeeds downstream but verification or commit fails, record `business_effect_occurred=True` without claiming rollback or re-executing.
+- **Rationale**: Adheres strictly to Genesis Hackathon safety invariants, preventing duplicate mutations and race conditions during concurrent execution.
+
+## ADR-025: Strict Pre-Execution Rejection Guarantees for Stateful Writes
+- **Context**: HTTP 400, 401, 403, and 422 status codes indicate rejection, but alone do not guarantee that the downstream server rejected the request *before* executing mutating side-effects.
+- **Decision**: Reject automated recovery retries for stateful HTTP writes (`POST`, `PUT`, `PATCH`, `DELETE`) with 400/401/403/422 status unless:
+  1. The execution guarantees explicitly specify `pre_execution_rejection: True`, or
+  2. The failure observation includes `validation_details["pre_execution_rejection"] = True`.
+- **Rationale**: Guarantees zero unverified writes on partially mutating endpoints, maintaining rock-solid retry safety.
+
 ---
 
 ## Technical Clarifications & Invariant Reminders
@@ -129,8 +147,9 @@
 > **Observation vs. Proof**:
 > 1. `expected_schema` alone in an error response does **not** establish semantic field correspondence (e.g. that `assignee_id` corresponds to `user_id`).
 > 2. An HTTP `401 Unauthorized` or `422 Unprocessable Content` status alone does **not** prove contract drift (it may indicate genuine authorization failure or bad caller intent).
-> 3. Proposed repair candidates remain strictly `proposed_unvalidated` until validated by Task 7 and staged/committed by Task 8.
-> 4. Validated candidates are marked `status: "validated_not_committed"`. Validation is a point-in-time check; Task 8 re-verifies version freshness under the tool lock before recovery dispatch.
+> 3. HTTP 400/401/403/422 status codes alone **never** authorize write retries without an explicit trusted pre-execution rejection guarantee.
+> 4. Proposed repair candidates remain strictly `proposed_unvalidated` until validated by Task 7 and staged/committed by Task 8.
+> 5. Validated candidates are marked `status: "validated_not_committed"`. Validation is a point-in-time check; Task 8 re-verifies version freshness under the tool lock before recovery dispatch.
 
 
 

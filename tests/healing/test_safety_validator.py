@@ -73,10 +73,14 @@ def _create_assign_tool() -> ToolDefinition:
 
 def _create_observation(
     tool: ToolDefinition,
-    status_code: int = 422,
+    status_code: int = 400,
     response_body: Optional[Dict[str, Any]] = None,
-    original_args: Optional[Dict[str, Any]] = None,
     uncertain_write: bool = False,
+    tool_name: Optional[str] = None,
+    registry_version: Optional[str] = None,
+    fingerprint: Optional[str] = None,
+    original_args: Optional[Dict[str, Any]] = None,
+    pre_execution_rejection: bool = True,
 ) -> FailureObservation:
     """Helper creating a valid FailureObservation."""
     args = original_args or {"ticket_id": 81, "user_id": "123"}
@@ -88,6 +92,9 @@ def _create_observation(
             },
         }
     }
+    details = dict(resp_body.get("error", {}).get("details", {}))
+    if pre_execution_rejection:
+        details["pre_execution_rejection"] = True
     return FailureObservation(
         tool_name=tool.name,
         registry_version=tool.version,
@@ -110,7 +117,7 @@ def _create_observation(
         write_attempted=True,
         uncertain_write=uncertain_write,
         raw_error_message=str(resp_body.get("error", {}).get("message", "Error")),
-        validation_details=resp_body.get("error", {}).get("details", {}),
+        validation_details=details,
         evidence_paths=[
             "response.body.details.migration_mapping.user_id",
             "response.body.error",
@@ -790,3 +797,91 @@ def test_validation_events_adhere_to_event_envelope():
     assert event_rej.tool == "assign_ticket"
     assert "Test rejection reason" in event_rej.data["rejection_reasons"]
     assert "test_check" in event_rej.data["failed_checks"]
+
+
+# =========================================================================
+# 7. Regression Tests for Task 7 Blockers
+# =========================================================================
+def test_status_only_rejection_cannot_authorize_recovery():
+    """Verify that HTTP 400/401/403/422 status alone never authorizes recovery without a trusted guarantee."""
+    tool = _create_assign_tool()
+    # Explicitly disable pre_execution_rejection evidence
+    obs = _create_observation(tool, status_code=400, pre_execution_rejection=False)
+    classification = _create_classification()
+    orig_args = {"ticket_id": 81, "user_id": "123"}
+
+    plan_res = plan_repair(tool, obs, classification)
+    assert plan_res.status == PlanningStatus.PROPOSED
+
+    # No execution_guarantees provided
+    val_res = validate_repair_proposal(
+        snapshot=tool,
+        original_arguments=orig_args,
+        observation=obs,
+        classification=classification,
+        proposal=plan_res,
+        registry_snapshot=tool,
+    )
+
+    assert val_res.status == ValidationStatus.REJECTED
+    assert val_res.authorized_for_recovery is False
+    assert any("alone does not prove rejection before mutation" in r for r in val_res.rejection_reasons)
+
+
+def test_string_to_integer_requires_evidenced_numeric_semantics():
+    """Verify that string-to-integer conversion is rejected if observation lacks numeric semantics."""
+    tool = _create_assign_tool()
+    # Observation says string expected, not integer
+    resp_body = {
+        "error": {
+            "details": {
+                "expected_schema": {"user_id": "string"},
+            }
+        }
+    }
+    obs = _create_observation(tool, response_body=resp_body)
+    classification = _create_classification()
+
+    # Create proposal with CAST_TYPE to_integer despite lack of integer evidence
+    op = PlannedOperation(
+        operation_type=RestrictedOperationType.CAST_TYPE,
+        source_path="user_id",
+        target_path="user_id",
+        conversion_policy="string_to_integer",
+        value_provenance="caller_argument:user_id",
+        evidence_path="response.body.details.expected_schema.user_id",
+        evidence_summary="Forced integer cast without numeric evidence",
+    )
+    plan_dict = {
+        "tool": tool.name,
+        "base_version": tool.version,
+        "base_fingerprint": tool.fingerprint,
+        "operations": [
+            {"type": op.operation_type.value, "source": op.source_path, "target": op.target_path, "conversion": op.conversion_policy, "credential_ref": op.credential_reference}
+        ],
+    }
+    import hashlib
+    raw_hash = json.dumps(plan_dict, sort_keys=True).encode("utf-8")
+    fp = hashlib.sha256(raw_hash).hexdigest()[:16]
+
+    proposal = PlanningResult(
+        status=PlanningStatus.PROPOSED,
+        tool_name=tool.name,
+        base_version=tool.version,
+        base_fingerprint=tool.fingerprint,
+        operations=[op],
+        proposal_fingerprint=fp,
+    )
+
+    val_res = validate_repair_proposal(
+        snapshot=tool,
+        original_arguments={"ticket_id": 81, "user_id": "123"},
+        observation=obs,
+        classification=classification,
+        proposal=proposal,
+        registry_snapshot=tool,
+    )
+
+    assert val_res.status == ValidationStatus.REJECTED
+    assert any("lacks evidenced numeric semantics" in r for r in val_res.rejection_reasons)
+
