@@ -431,9 +431,11 @@ async def test_truthful_token_usage_reporting():
     assert result["usage"]["diagnosis_tokens"] == 0
 
 
-def test_missing_provider_config_fails_clearly():
+def test_missing_provider_config_fails_clearly(monkeypatch):
     """Verify lazy model factory raises ModelConfigurationError on missing credentials."""
     import os
+    import orchestrator.agents.model_provider as model_provider
+
     orig_key = os.environ.get("GEMINI_API_KEY")
     orig_google = os.environ.get("GOOGLE_API_KEY")
     orig_openai = os.environ.get("OPENAI_API_KEY")
@@ -441,6 +443,7 @@ def test_missing_provider_config_fails_clearly():
         os.environ.pop("GEMINI_API_KEY", None)
         os.environ.pop("GOOGLE_API_KEY", None)
         os.environ.pop("OPENAI_API_KEY", None)
+        monkeypatch.setattr(model_provider.settings, "model_api_key", None)
 
         with pytest.raises(ModelConfigurationError) as exc_info:
             create_chat_model(provider="google_genai")
