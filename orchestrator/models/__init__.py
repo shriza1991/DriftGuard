@@ -21,6 +21,8 @@ RunEventType = Literal[
     "tool_call_started",
     "tool_call_failed",
     "diagnosis_started",
+    "llm_policy_decision",
+    "cache_hit_validated",
     "patch_proposed",
     "patch_validated",
     "patch_rejected",

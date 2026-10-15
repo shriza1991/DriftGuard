@@ -86,9 +86,11 @@ async def test_audit_store_initialization_and_schema(audit_store: SQLiteAuditSto
         assert "repair_attempts" in tables
         assert "events" in tables
         assert "model_usages" in tables
+        assert "llm_interactions" in tables
+        assert "validated_repair_cache" in tables
 
         cur = conn.execute("SELECT MAX(version) as v FROM schema_migrations;")
-        assert cur.fetchone()["v"] == 2
+        assert cur.fetchone()["v"] == 3
 
         # Test idempotency: re-initializing should not fail
         await audit_store.initialize()

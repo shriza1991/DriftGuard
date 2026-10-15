@@ -54,6 +54,14 @@ class PlanningResult(BaseModel):
     source: str = "deterministic"
     diagnosis_tokens: Optional[Dict[str, int]] = None
     explanation: Optional[str] = None
+    interaction_id: Optional[str] = None
+    interaction_persisted: bool = False
+    interaction_status: Optional[str] = None
+    model_latency_ms: Optional[float] = None
+    prompt_version: Optional[str] = None
+    response_schema_version: Optional[str] = None
+    cache_key: Optional[str] = None
+    cache_status: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     @property

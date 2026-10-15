@@ -76,7 +76,11 @@ class HealingAgent:
         # Initialize recovery controller with dependency injection
         executor = ToolExecutor(registry=self.registry, client=self._client)
         diagnoser = (
-            LLMDiagnoser(model=self._model, approved_header_credentials=self.approved_header_credentials)
+            LLMDiagnoser(
+                model=self._model,
+                approved_header_credentials=self.approved_header_credentials,
+                audit_store=self.audit_store,
+            )
             if self._model is not None
             else None
         )
@@ -92,6 +96,12 @@ class HealingAgent:
         )
         if recovery_controller and getattr(recovery_controller, "audit_store", None) is None:
             recovery_controller.audit_store = self.audit_store
+        if (
+            recovery_controller
+            and recovery_controller.llm_diagnoser is not None
+            and getattr(recovery_controller.llm_diagnoser, "audit_store", None) is None
+        ):
+            recovery_controller.llm_diagnoser.audit_store = self.audit_store
 
     @property
     def event_broadcaster(self) -> EventBroadcaster:
@@ -248,9 +258,14 @@ class HealingAgent:
         if gateway is not None:
             self.recovery_controller.llm_diagnoser = LLMDiagnoser(
                 model=active_model.provider_model, gateway=gateway,
-                approved_header_credentials=self.approved_header_credentials)
+                approved_header_credentials=self.approved_header_credentials,
+                audit_store=self.audit_store)
         elif self.recovery_controller.llm_diagnoser is None:
-            self.recovery_controller.llm_diagnoser = LLMDiagnoser(model=active_model, approved_header_credentials=self.approved_header_credentials)
+            self.recovery_controller.llm_diagnoser = LLMDiagnoser(
+                model=active_model,
+                approved_header_credentials=self.approved_header_credentials,
+                audit_store=self.audit_store,
+            )
 
         # Ensure recovery controller has active diagnoser model if active_model resolved
         if self.recovery_controller.llm_diagnoser is not None and self.recovery_controller.llm_diagnoser.model is None:

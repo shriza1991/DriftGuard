@@ -6,7 +6,7 @@ from enum import Enum
 import time
 import asyncio
 import copy
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pydantic import BaseModel, Field
 
 from orchestrator.models import (
@@ -35,6 +35,21 @@ from orchestrator.execution.events import EventBroadcaster, event_broadcaster
 from orchestrator.healing.planner import plan_repair
 from orchestrator.healing.validator import validate_repair_proposal, emit_patch_validation_event
 from orchestrator.healing.classifier import classify_failure
+from orchestrator.healing.llm_policy import (
+    LLMCallDecision,
+    POLICY_VERSION,
+    decide_repair_llm_call,
+)
+from orchestrator.healing.llm_cache import (
+    build_repair_cache_key,
+    planning_result_from_cached_operations,
+)
+from orchestrator.healing.llm_diagnosis import (
+    PROMPT_TEMPLATE_VERSION,
+    RESPONSE_SCHEMA_VERSION,
+)
+from orchestrator.audit.models import PersistedRepairCacheEntry
+from orchestrator.config import settings
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -82,6 +97,18 @@ class RecoveryResult(BaseModel):
     diagnosis_tokens: int = 0
     diagnosis_token_details: Optional[Dict[str, int]] = None
     staged_candidate_discarded: bool = False
+    llm_policy_decision: Optional[str] = None
+    llm_policy_reason: Optional[str] = None
+    llm_reason_no_call: Optional[str] = None
+    repair_llm_calls: int = 0
+    decision_path: Optional[str] = None
+    cache_status: str = "bypassed"
+    cache_key: Optional[str] = None
+    cache_lookup_latency_ms: Optional[float] = None
+    llm_interaction_id: Optional[str] = None
+    llm_interaction_status: Optional[str] = None
+    model_latency_ms: Optional[float] = None
+    circuit_breaker_opened: bool = False
 
 
 async def default_verify_business_intent(
@@ -205,6 +232,8 @@ class RecoveryController:
         self.llm_diagnoser = llm_diagnoser
         self.diagnosis_timeout = diagnosis_timeout
         self.audit_store = audit_store
+        if self.llm_diagnoser is not None and getattr(self.llm_diagnoser, "audit_store", None) is None:
+            self.llm_diagnoser.audit_store = audit_store
 
         # Track attempted proposal fingerprints per logical operation to prevent repeated cycles
         self._attempted_proposals: Set[str] = set()
@@ -512,17 +541,132 @@ class RecoveryController:
                 diagnosis_source = "deterministic"
                 diagnosis_tokens = 0
                 diagnosis_token_details: Optional[Dict[str, int]] = None
+                repair_llm_calls = 0
+                llm_interaction_id: Optional[str] = None
+                llm_interaction_status: Optional[str] = None
+                model_latency_ms: Optional[float] = None
+                cache_status = "bypassed"
+                cache_key: Optional[str] = None
+                cache_lookup_latency_ms: Optional[float] = None
+                cache_scope_hashes: Dict[str, str] = {}
+                model_configuration_hash = ""
+                cached_entry: Optional[PersistedRepairCacheEntry] = None
 
-                # Fallback to LLM diagnoser if deterministic planning returned insufficient_evidence or unsupported
-                if (
-                    plan_result.status in (PlanningStatus.INSUFFICIENT_EVIDENCE, PlanningStatus.UNSUPPORTED)
-                    and self.llm_diagnoser is not None
-                    and classification.diagnosis_eligible
-                    and classification.category == SemanticFailureCategory.SCHEMA_DRIFT
-                    and not observation.uncertain_write
-                    and op_key not in self._diagnosed_operations
-                ):
+                if plan_result.status != PlanningStatus.PROPOSED:
+                    provider_origin = getattr(self.executor.client, "base_url", "local-or-unknown")
+                    provider_identity = type(self.executor.client).__name__
+                    tenant_scope = str(
+                        original_arguments.get("tenant_id")
+                        or original_arguments.get("workspace_id")
+                        or original_arguments.get("account_id")
+                        or "default"
+                    )
+                    model_provider = str(getattr(self.llm_diagnoser, "provider_name", settings.model_provider))
+                    model_name = str(getattr(self.llm_diagnoser, "model_name", settings.model_name))
+                    cache_key, cache_scope_hashes, model_configuration_hash = build_repair_cache_key(
+                        provider_identity=provider_identity,
+                        provider_origin=provider_origin,
+                        tenant_scope=tenant_scope,
+                        snapshot=active_tool,
+                        observation=observation,
+                        classification=classification,
+                        prompt_version=PROMPT_TEMPLATE_VERSION,
+                        response_schema_version=RESPONSE_SCHEMA_VERSION,
+                        model_provider=model_provider,
+                        model_name=model_name,
+                    )
+                    if self.audit_store is not None:
+                        lookup_start = time.perf_counter()
+                        try:
+                            cached_entry = await self.audit_store.get_validated_repair_cache(cache_key)
+                            cache_status = "hit" if cached_entry else "miss"
+                        except Exception:
+                            cache_status = "unavailable"
+                        cache_lookup_latency_ms = round(
+                            (time.perf_counter() - lookup_start) * 1000, 3
+                        )
+
+                    if cached_entry is not None:
+                        try:
+                            if (
+                                cached_entry.base_version != active_tool.version
+                                or cached_entry.base_fingerprint != active_fp
+                                or cached_entry.policy_version != POLICY_VERSION
+                                or cached_entry.prompt_version != PROMPT_TEMPLATE_VERSION
+                                or cached_entry.response_schema_version != RESPONSE_SCHEMA_VERSION
+                                or cached_entry.model_configuration_hash != model_configuration_hash
+                            ):
+                                raise ValueError("Cached repair scope or policy is stale")
+                            cached_plan = planning_result_from_cached_operations(
+                                snapshot=active_tool,
+                                observation=observation,
+                                classification=classification,
+                                operations=cached_entry.operations,
+                                expected_proposal_fingerprint=cached_entry.proposal_fingerprint,
+                                original_interaction_id=cached_entry.original_interaction_id,
+                            )
+                        except Exception as cache_error:
+                            cache_status = "invalidated"
+                            cached_entry = None
+                            try:
+                                await self.audit_store.invalidate_repair_cache(cache_key, str(cache_error))
+                            except Exception:
+                                cache_status = "unavailable"
+
+                policy_result = decide_repair_llm_call(
+                    classification=classification,
+                    deterministic_plan=plan_result,
+                    observation=observation,
+                    validated_cache_hit=cached_entry is not None,
+                    retry_policy_approved=(
+                        classification.retry_safety.safe_if_adapted
+                        or classification.retry_safety.safe_to_retry
+                    ),
+                    incident_budget_consumed=op_key in self._diagnosed_operations,
+                    circuit_breaker_open=bool(
+                        self.llm_diagnoser is not None
+                        and getattr(self.llm_diagnoser, "runtime", None) is not None
+                        and self.llm_diagnoser.runtime.is_open()
+                    ),
+                    model_configured=bool(
+                        self.llm_diagnoser is not None
+                        and getattr(self.llm_diagnoser, "model", None) is not None
+                        and self.audit_store is not None
+                    ),
+                )
+                self._emit_event(
+                    run_id=run_id,
+                    mode=mode,
+                    event_type="llm_policy_decision",
+                    tool=tool_name,
+                    data={
+                        "decision": policy_result.decision.value,
+                        "policy_version": policy_result.policy_version,
+                        "reason_no_call": policy_result.reason_no_call,
+                        "cache_status": cache_status,
+                    },
+                )
+
+                # One bounded LLM interaction is allowed only by the central policy.
+                if policy_result.decision == LLMCallDecision.USE_VALIDATED_CACHE:
+                    plan_result = cached_plan
+                    diagnosis_source = "validated_cache"
+                    llm_interaction_id = cached_entry.original_interaction_id
+                    self._emit_event(
+                        run_id=run_id,
+                        mode=mode,
+                        event_type="cache_hit_validated",
+                        tool=tool_name,
+                        data={
+                            "cache_key": cache_key,
+                            "interaction_id": cached_entry.original_interaction_id,
+                            "proposal_fingerprint": cached_entry.proposal_fingerprint,
+                            "policy_version": POLICY_VERSION,
+                        },
+                    )
+                elif policy_result.decision == LLMCallDecision.CALL_LLM_ONCE:
                     self._diagnosed_operations.add(op_key)
+                    repair_llm_calls = 1
                     rem_time = None
                     if timeout_budget is not None:
                         rem_time = max(0.0, timeout_budget - (time.perf_counter() - start_time))
@@ -534,7 +678,13 @@ class RecoveryController:
                             observation=observation,
                             classification=classification,
                             timeout_budget=diag_budget,
+                            run_id=run_id,
+                            incident_id=op_key,
+                            cache_key=cache_key,
                         )
+                        llm_interaction_id = llm_result.interaction_id
+                        llm_interaction_status = llm_result.interaction_status
+                        model_latency_ms = llm_result.model_latency_ms
                         if llm_result.diagnosis_tokens:
                             diagnosis_tokens = llm_result.diagnosis_tokens.get("total_tokens", 0)
                             diagnosis_token_details = llm_result.diagnosis_tokens
@@ -553,7 +703,40 @@ class RecoveryController:
                                 diagnosis_source="llm_assisted",
                                 diagnosis_tokens=diagnosis_tokens,
                                 diagnosis_token_details=diagnosis_token_details,
+                                llm_policy_decision=policy_result.decision.value,
+                                llm_policy_reason=policy_result.reason,
+                                llm_reason_no_call=policy_result.reason_no_call,
+                                repair_llm_calls=repair_llm_calls,
+                                decision_path="safe_stop",
+                                cache_status=cache_status,
+                                cache_key=cache_key,
+                                cache_lookup_latency_ms=cache_lookup_latency_ms,
+                                llm_interaction_id=llm_interaction_id,
+                                llm_interaction_status=llm_interaction_status,
+                                model_latency_ms=model_latency_ms,
                             )
+
+                elif policy_result.decision not in (
+                    LLMCallDecision.USE_DETERMINISTIC_RULE,
+                    LLMCallDecision.USE_VALIDATED_CACHE,
+                ):
+                    return RecoveryResult(
+                        status=RecoveryStatus.PLANNING_FAILED,
+                        recovered=False,
+                        tool_name=tool_name,
+                        base_version=active_tool.version,
+                        base_fingerprint=active_fp,
+                        termination_reason=policy_result.reason,
+                        duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
+                        llm_policy_decision=policy_result.decision.value,
+                        llm_policy_reason=policy_result.reason,
+                        llm_reason_no_call=policy_result.reason_no_call,
+                        repair_llm_calls=0,
+                        decision_path="safe_stop",
+                        cache_status=cache_status,
+                        cache_key=cache_key,
+                        cache_lookup_latency_ms=cache_lookup_latency_ms,
+                    )
 
                 if plan_result.status != PlanningStatus.PROPOSED:
                     return RecoveryResult(
@@ -567,6 +750,17 @@ class RecoveryController:
                         diagnosis_source=diagnosis_source,
                         diagnosis_tokens=diagnosis_tokens,
                         diagnosis_token_details=diagnosis_token_details,
+                        llm_policy_decision=policy_result.decision.value,
+                        llm_policy_reason=policy_result.reason,
+                        llm_reason_no_call=policy_result.reason_no_call,
+                        repair_llm_calls=repair_llm_calls,
+                        decision_path="safe_stop",
+                        cache_status=cache_status,
+                        cache_key=cache_key,
+                        cache_lookup_latency_ms=cache_lookup_latency_ms,
+                        llm_interaction_id=llm_interaction_id,
+                        llm_interaction_status=llm_interaction_status,
+                        model_latency_ms=model_latency_ms,
                     )
 
                 proposal_fp = plan_result.proposal_fingerprint
@@ -620,6 +814,48 @@ class RecoveryController:
                     execution_guarantees=self.execution_guarantees,
                 )
 
+                if diagnosis_source == "llm_assisted" and llm_interaction_id:
+                    final_validation = (
+                        "accepted"
+                        if val_result.status == ValidationStatus.ACCEPTED and val_result.authorized_for_recovery
+                        else "rejected"
+                    )
+                    final_decision = (
+                        "authorized_for_single_retry"
+                        if final_validation == "accepted" else "safe_stop"
+                    )
+                    try:
+                        await self.audit_store.finalize_llm_interaction(
+                            llm_interaction_id, final_validation, final_decision
+                        )
+                        llm_interaction_status = final_validation
+                    except Exception:
+                        return RecoveryResult(
+                            status=RecoveryStatus.EXECUTION_FAILED,
+                            recovered=False,
+                            tool_name=tool_name,
+                            base_version=active_tool.version,
+                            base_fingerprint=active_fp,
+                            proposal_fingerprint=plan_result.proposal_fingerprint,
+                            termination_reason=(
+                                "Mandatory LLM interaction audit finalization failed; repaired dispatch blocked."
+                            ),
+                            duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
+                            diagnosis_source=diagnosis_source,
+                            diagnosis_tokens=diagnosis_tokens,
+                            diagnosis_token_details=diagnosis_token_details,
+                            llm_policy_decision=policy_result.decision.value,
+                            llm_policy_reason=policy_result.reason,
+                            repair_llm_calls=repair_llm_calls,
+                            decision_path="safe_stop",
+                            cache_status=cache_status,
+                            cache_key=cache_key,
+                            cache_lookup_latency_ms=cache_lookup_latency_ms,
+                            llm_interaction_id=llm_interaction_id,
+                            llm_interaction_status="audit_storage_failure",
+                            model_latency_ms=model_latency_ms,
+                        )
+
                 # Emit validation event
                 emit_patch_validation_event(
                     event_broadcaster=self.events,
@@ -643,6 +879,17 @@ class RecoveryController:
                         diagnosis_source=diagnosis_source,
                         diagnosis_tokens=diagnosis_tokens,
                         diagnosis_token_details=diagnosis_token_details,
+                        llm_policy_decision=policy_result.decision.value,
+                        llm_policy_reason=policy_result.reason,
+                        llm_reason_no_call=policy_result.reason_no_call,
+                        repair_llm_calls=repair_llm_calls,
+                        decision_path="safe_stop",
+                        cache_status=cache_status,
+                        cache_key=cache_key,
+                        cache_lookup_latency_ms=cache_lookup_latency_ms,
+                        llm_interaction_id=llm_interaction_id,
+                        llm_interaction_status=llm_interaction_status,
+                        model_latency_ms=model_latency_ms,
                     )
                     await self._audit_repair_attempt(
                         run_id=run_id,
@@ -929,6 +1176,40 @@ class RecoveryController:
                     },
                 )
 
+                if (
+                    diagnosis_source == "llm_assisted"
+                    and llm_interaction_id
+                    and cache_key
+                    and self.audit_store is not None
+                ):
+                    now = datetime.now(timezone.utc)
+                    cache_entry = PersistedRepairCacheEntry(
+                        cache_key=cache_key,
+                        scope_hashes=cache_scope_hashes,
+                        tool_name=tool_name,
+                        base_version=active_tool.version,
+                        base_fingerprint=active_fp,
+                        policy_version=POLICY_VERSION,
+                        prompt_version=PROMPT_TEMPLATE_VERSION,
+                        response_schema_version=RESPONSE_SCHEMA_VERSION,
+                        model_configuration_hash=model_configuration_hash,
+                        operations=[op.model_dump(mode="json") for op in plan_result.operations],
+                        evidence_references=plan_result.evidence_references,
+                        proposal_fingerprint=proposal_fp,
+                        original_interaction_id=llm_interaction_id,
+                        committed_version=committed_tool.version,
+                        committed_fingerprint=committed_tool.fingerprint,
+                        created_at=now.isoformat(),
+                        expires_at=(
+                            now + timedelta(seconds=settings.repair_cache_ttl_seconds)
+                        ).isoformat(),
+                    )
+                    try:
+                        inserted = await self.audit_store.put_validated_repair_cache(cache_entry)
+                        cache_status = "stored" if inserted else "existing"
+                    except Exception:
+                        cache_status = "unavailable"
+
                 total_duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
                 res = RecoveryResult(
                     status=RecoveryStatus.RECOVERED,
@@ -951,6 +1232,21 @@ class RecoveryController:
                     diagnosis_source=diagnosis_source,
                     diagnosis_tokens=diagnosis_tokens,
                     diagnosis_token_details=diagnosis_token_details,
+                    llm_policy_decision=policy_result.decision.value,
+                    llm_policy_reason=policy_result.reason,
+                    llm_reason_no_call=policy_result.reason_no_call,
+                    repair_llm_calls=repair_llm_calls,
+                    decision_path=(
+                        "deterministic" if diagnosis_source == "deterministic"
+                        else "cache" if diagnosis_source == "validated_cache"
+                        else "llm"
+                    ),
+                    cache_status=cache_status,
+                    cache_key=cache_key,
+                    cache_lookup_latency_ms=cache_lookup_latency_ms,
+                    llm_interaction_id=llm_interaction_id,
+                    llm_interaction_status=llm_interaction_status,
+                    model_latency_ms=model_latency_ms,
                 )
                 await self._audit_repair_attempt(
                     run_id=run_id,

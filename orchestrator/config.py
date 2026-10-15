@@ -14,6 +14,14 @@ class OrchestratorSettings(BaseSettings):
     model_api_key: Optional[str] = Field(default=None, repr=False, validation_alias=AliasChoices("ORCHESTRATOR_MODEL_API_KEY", "MODEL_API_KEY"))
     groq_api_key: Optional[str] = Field(default=None, repr=False, validation_alias="GROQ_API_KEY")
     sqlite_db_path: str = "driftguard.sqlite3"
+    llm_interaction_retention_days: int = 30
+    repair_cache_ttl_seconds: int = 604800
+    repair_cache_max_entries: int = 1000
+    repair_llm_timeout_seconds: float = 5.0
+    repair_llm_max_response_bytes: int = 32768
+    repair_llm_global_concurrency: int = 4
+    repair_llm_breaker_failure_threshold: int = 3
+    repair_llm_breaker_cooldown_seconds: float = 60.0
     log_level: str = "INFO"
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
     assignment_token: Optional[str] = Field(default=None, repr=False)

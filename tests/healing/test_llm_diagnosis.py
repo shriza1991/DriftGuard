@@ -17,6 +17,7 @@ import json
 import httpx
 import asyncio
 from typing import Dict, Any, Optional, List
+from pathlib import Path
 
 from langchain_core.messages import AIMessage, ToolCall
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -51,6 +52,7 @@ from orchestrator.healing.llm_diagnosis import (
 )
 from orchestrator.agents.healing import HealingAgent
 from orchestrator.agents.baseline import BaselineAgent
+from orchestrator.audit.store import SQLiteAuditStore
 
 
 from orchestrator.healing.classifier import classify_failure
@@ -84,6 +86,28 @@ class FakeScriptedChatModel:
         self._counter[0] += 1
         if idx < len(self.responses):
             resp = self.responses[idx]
+            if isinstance(resp.content, str):
+                try:
+                    legacy = json.loads(resp.content)
+                except (TypeError, json.JSONDecodeError):
+                    legacy = None
+                if isinstance(legacy, dict) and "status" in legacy and "operations" in legacy:
+                    operations = legacy.get("operations") or []
+                    evidence_refs = sorted({
+                        str(op.get("evidence_path", "raw_error_message"))
+                        for op in operations if isinstance(op, dict)
+                    }) or ["raw_error_message"]
+                    envelope = {
+                        "diagnosis": {
+                            "category": "schema_drift",
+                            "confidence": 0.95 if legacy.get("status") == "proposed" else 0.2,
+                            "evidence_refs": evidence_refs,
+                        },
+                        "patch": {"operations": operations},
+                        "reasoning_summary": legacy.get("explanation") or "No safe proposal available.",
+                        "stop_if_invalid": True,
+                    }
+                    resp = resp.model_copy(update={"content": json.dumps(envelope)})
             if not hasattr(resp, "usage_metadata") or resp.usage_metadata is None:
                 resp.usage_metadata = self.usage_metadata
             return resp
@@ -188,7 +212,7 @@ async def test_deterministic_success_skips_llm_diagnosis():
 # 2. Supported Natural-Language Rename
 # -----------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_llm_diagnosis_supported_natural_language_rename():
+async def test_llm_diagnosis_supported_natural_language_rename(tmp_path: Path):
     """Natural-language text 'user_id was renamed to assignee_id' triggers LLM fallback and heals."""
     registry = VersionedToolRegistry.create_default()
     broadcaster = EventBroadcaster()
@@ -232,13 +256,16 @@ async def test_llm_diagnosis_supported_natural_language_rename():
         responses=[AIMessage(content=json.dumps(llm_response))],
         usage_metadata={"input_tokens": 150, "output_tokens": 50, "total_tokens": 200},
     )
-    diagnoser = LLMDiagnoser(model=fake_model)
+    audit_store = SQLiteAuditStore(str(tmp_path / "rename.sqlite3"))
+    await audit_store.initialize()
+    diagnoser = LLMDiagnoser(model=fake_model, audit_store=audit_store)
 
     controller = RecoveryController(
         registry=registry,
         executor=executor,
         event_broadcaster=broadcaster,
         llm_diagnoser=diagnoser,
+        audit_store=audit_store,
         execution_guarantees={"pre_execution_rejection": True},
     )
 
@@ -265,7 +292,7 @@ async def test_llm_diagnosis_supported_natural_language_rename():
 # 3. Supported Natural-Language Nesting
 # -----------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_llm_diagnosis_supported_natural_language_nesting():
+async def test_llm_diagnosis_supported_natural_language_nesting(tmp_path: Path):
     """Natural-language text 'user_id is now nested under target.id' triggers LLM nesting repair."""
     registry = VersionedToolRegistry.create_default()
     broadcaster = EventBroadcaster()
@@ -309,13 +336,16 @@ async def test_llm_diagnosis_supported_natural_language_nesting():
         responses=[AIMessage(content=json.dumps(llm_response))],
         usage_metadata={"input_tokens": 160, "output_tokens": 55, "total_tokens": 215},
     )
-    diagnoser = LLMDiagnoser(model=fake_model)
+    audit_store = SQLiteAuditStore(str(tmp_path / "nesting.sqlite3"))
+    await audit_store.initialize()
+    diagnoser = LLMDiagnoser(model=fake_model, audit_store=audit_store)
 
     controller = RecoveryController(
         registry=registry,
         executor=executor,
         event_broadcaster=broadcaster,
         llm_diagnoser=diagnoser,
+        audit_store=audit_store,
         execution_guarantees={"pre_execution_rejection": True},
     )
 
@@ -337,7 +367,7 @@ async def test_llm_diagnosis_supported_natural_language_nesting():
 # 4. Supported Natural-Language Type Conversion
 # -----------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_llm_diagnosis_supported_natural_language_type_conversion():
+async def test_llm_diagnosis_supported_natural_language_type_conversion(tmp_path: Path):
     """Natural-language text 'user_id must be of type integer' triggers lossless cast repair."""
     registry = VersionedToolRegistry.create_default()
     broadcaster = EventBroadcaster()
@@ -380,13 +410,16 @@ async def test_llm_diagnosis_supported_natural_language_type_conversion():
     fake_model = FakeScriptedChatModel(
         responses=[AIMessage(content=json.dumps(llm_response))],
     )
-    diagnoser = LLMDiagnoser(model=fake_model)
+    audit_store = SQLiteAuditStore(str(tmp_path / "type.sqlite3"))
+    await audit_store.initialize()
+    diagnoser = LLMDiagnoser(model=fake_model, audit_store=audit_store)
 
     controller = RecoveryController(
         registry=registry,
         executor=executor,
         event_broadcaster=broadcaster,
         llm_diagnoser=diagnoser,
+        audit_store=audit_store,
         execution_guarantees={"pre_execution_rejection": True},
     )
 
@@ -406,8 +439,8 @@ async def test_llm_diagnosis_supported_natural_language_type_conversion():
 # 5. Missing-Field-Only Evidence Refusal
 # -----------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_llm_diagnosis_missing_field_only_refused_by_validator():
-    """A missing-field error alone ('Missing required parameter: assignee_id') cannot authorize rename."""
+async def test_missing_field_only_stops_before_llm_or_validator():
+    """A missing field alone is a policy stop, not grounds for model speculation."""
     registry = VersionedToolRegistry.create_default()
     broadcaster = EventBroadcaster()
 
@@ -457,15 +490,17 @@ async def test_llm_diagnosis_missing_field_only_refused_by_validator():
     )
 
     assert res.recovered is False
-    assert res.status == RecoveryStatus.VALIDATION_REJECTED
-    assert "does not semantically support renaming" in (res.termination_reason or "")
+    assert res.status == RecoveryStatus.PLANNING_FAILED
+    assert res.llm_policy_decision == "safe_stop"
+    assert res.llm_policy_reason == "Deterministic policy already requires an authoritative stop."
+    assert fake_model.call_count == 0
 
 
 # -----------------------------------------------------------------------------
 # 6. Forged Quotes and Fabricated Evidence Rejected
 # -----------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_llm_diagnosis_forged_quote_rejected_locally():
+async def test_llm_diagnosis_forged_quote_rejected_locally(tmp_path: Path):
     """When the model quotes text that does not exist in the observation, it is rejected locally."""
     registry = VersionedToolRegistry.create_default()
     tool = registry.get("assign_ticket")
@@ -489,7 +524,9 @@ async def test_llm_diagnosis_forged_quote_rejected_locally():
     }
 
     fake_model = FakeScriptedChatModel(responses=[AIMessage(content=json.dumps(llm_response))])
-    diagnoser = LLMDiagnoser(model=fake_model)
+    audit_store = SQLiteAuditStore(str(tmp_path / "forged.sqlite3"))
+    await audit_store.initialize()
+    diagnoser = LLMDiagnoser(model=fake_model, audit_store=audit_store)
 
     result = await diagnoser.diagnose(
         snapshot=tool,
@@ -505,7 +542,7 @@ async def test_llm_diagnosis_forged_quote_rejected_locally():
 # 7. Prompt Injection Defense
 # -----------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_llm_diagnosis_prompt_injection_text_cannot_redirect():
+async def test_llm_diagnosis_prompt_injection_text_cannot_redirect(tmp_path: Path):
     """Malicious injection in error text attempting /admin endpoint or mutation alteration is rejected."""
     registry = VersionedToolRegistry.create_default()
     tool = registry.get("assign_ticket")
@@ -534,7 +571,9 @@ async def test_llm_diagnosis_prompt_injection_text_cannot_redirect():
     }
 
     fake_model = FakeScriptedChatModel(responses=[AIMessage(content=json.dumps(llm_response))])
-    diagnoser = LLMDiagnoser(model=fake_model)
+    audit_store = SQLiteAuditStore(str(tmp_path / "injection.sqlite3"))
+    await audit_store.initialize()
+    diagnoser = LLMDiagnoser(model=fake_model, audit_store=audit_store)
 
     result = await diagnoser.diagnose(
         snapshot=tool,
@@ -599,7 +638,7 @@ async def test_safety_refusals_and_uncertain_writes_do_not_trigger_llm():
 # 9. Provider Errors, Malformed Output, and Timeout Terminate Without Re-prompting
 # -----------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_invalid_structured_output_provider_error_and_timeout():
+async def test_invalid_structured_output_provider_error_and_timeout(tmp_path: Path):
     """Malformed output, provider exception, and timeout terminate cleanly without re-prompt loops."""
     registry = VersionedToolRegistry.create_default()
     tool = registry.get("assign_ticket")
@@ -607,7 +646,9 @@ async def test_invalid_structured_output_provider_error_and_timeout():
 
     # 1. Malformed JSON
     fake_malformed = FakeScriptedChatModel(responses=[AIMessage(content="Not valid JSON at all!")])
-    diag1 = LLMDiagnoser(model=fake_malformed)
+    audit_store = SQLiteAuditStore(str(tmp_path / "failures.sqlite3"))
+    await audit_store.initialize()
+    diag1 = LLMDiagnoser(model=fake_malformed, audit_store=audit_store)
     res1 = await diag1.diagnose(tool, obs, classify_failure(obs))
     assert res1.status == PlanningStatus.INSUFFICIENT_EVIDENCE
     assert fake_malformed.call_count == 1
@@ -617,7 +658,7 @@ async def test_invalid_structured_output_provider_error_and_timeout():
         async def ainvoke(self, messages):
             raise RuntimeError("Provider connection reset by peer")
 
-    diag2 = LLMDiagnoser(model=ErrorModel())
+    diag2 = LLMDiagnoser(model=ErrorModel(), audit_store=audit_store)
     res2 = await diag2.diagnose(tool, obs, classify_failure(obs))
     assert res2.status == PlanningStatus.INSUFFICIENT_EVIDENCE
     assert res2.reasons[0] == "Model provider request failed (provider error)."
@@ -629,7 +670,7 @@ async def test_invalid_structured_output_provider_error_and_timeout():
             await asyncio.sleep(0.5)
             return AIMessage(content="{}")
 
-    diag3 = LLMDiagnoser(model=SlowModel(), timeout_sec=0.05)
+    diag3 = LLMDiagnoser(model=SlowModel(), timeout_sec=0.05, audit_store=audit_store)
     res3 = await diag3.diagnose(tool, obs, classify_failure(obs))
     assert res3.status == PlanningStatus.INSUFFICIENT_EVIDENCE
     assert "timed out" in res3.reasons[0]
@@ -639,7 +680,7 @@ async def test_invalid_structured_output_provider_error_and_timeout():
 # 10. Maximum One LLM Diagnosis Call Per Operation
 # -----------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_maximum_one_llm_call_per_operation():
+async def test_maximum_one_llm_call_per_operation(tmp_path: Path):
     """At most one LLM diagnosis call per logical operation; cannot re-prompt or reopen."""
     registry = VersionedToolRegistry.create_default()
     broadcaster = EventBroadcaster()
@@ -674,13 +715,16 @@ async def test_maximum_one_llm_call_per_operation():
         AIMessage(content=json.dumps(llm_response)),
         AIMessage(content=json.dumps(llm_response)),
     ])
-    diagnoser = LLMDiagnoser(model=fake_model)
+    audit_store = SQLiteAuditStore(str(tmp_path / "one-call.sqlite3"))
+    await audit_store.initialize()
+    diagnoser = LLMDiagnoser(model=fake_model, audit_store=audit_store)
 
     controller = RecoveryController(
         registry=registry,
         executor=executor,
         event_broadcaster=broadcaster,
         llm_diagnoser=diagnoser,
+        audit_store=audit_store,
         execution_guarantees={"pre_execution_rejection": True},
     )
 
@@ -711,7 +755,7 @@ async def test_maximum_one_llm_call_per_operation():
 # 11. Truthful Session Usage Aggregation in HealingAgent
 # -----------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_healing_agent_truthful_diagnosis_tokens_and_event_broadcasting():
+async def test_healing_agent_truthful_diagnosis_tokens_and_event_broadcasting(tmp_path: Path):
     """Verifies that diagnosis tokens are aggregated truthfully in session model_usage and emitted events."""
     registry = VersionedToolRegistry.create_default()
     broadcaster = EventBroadcaster()
@@ -782,13 +826,16 @@ async def test_healing_agent_truthful_diagnosis_tokens_and_event_broadcasting():
         usage_metadata={"input_tokens": 110, "output_tokens": 40, "total_tokens": 150},
     )
 
-    diagnoser = LLMDiagnoser(model=diag_model)
+    audit_store = SQLiteAuditStore(str(tmp_path / "agent.sqlite3"))
+    await audit_store.initialize()
+    diagnoser = LLMDiagnoser(model=diag_model, audit_store=audit_store)
     executor = ToolExecutor(registry=registry, client=client)
     controller = RecoveryController(
         registry=registry,
         executor=executor,
         event_broadcaster=broadcaster,
         llm_diagnoser=diagnoser,
+        audit_store=audit_store,
         execution_guarantees={"pre_execution_rejection": True},
     )
 
@@ -797,6 +844,7 @@ async def test_healing_agent_truthful_diagnosis_tokens_and_event_broadcasting():
         client=client,
         model=agent_model,
         recovery_controller=controller,
+        audit_store=audit_store,
     )
 
     res = await agent.execute_workflow(run_id="run-token-test-01")

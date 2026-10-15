@@ -55,7 +55,7 @@ export function candidateState(events: RunEvent[]): CandidateState {
 
 export function eventTone(type: RunEvent['type']): 'blue' | 'amber' | 'green' | 'red' {
   if (type === 'tool_call_failed' || type === 'patch_rejected' || type === 'run_failed') return 'red';
-  if (type === 'diagnosis_started' || type === 'patch_proposed' || type === 'patch_validated') return 'amber';
+  if (type === 'diagnosis_started' || type === 'llm_policy_decision' || type === 'cache_hit_validated' || type === 'patch_proposed' || type === 'patch_validated') return 'amber';
   if (type === 'recovery_verified' || type === 'registry_committed' || type === 'run_completed') return 'green';
   return 'blue';
 }
@@ -93,6 +93,8 @@ export function eventSummary(event: RunEvent): string {
       return `Calling ${safeText(tool)}.`;
     case 'tool_call_failed': return typeof event.data.message === 'string' ? safeText(event.data.message) : `${safeText(tool)} failed${event.data.status_code == null ? '' : ` with HTTP ${safeText(event.data.status_code)}`}.`;
     case 'diagnosis_started': return `Diagnosing the observed ${safeText(tool)} failure using the available response evidence.`;
+    case 'llm_policy_decision': return `Repair decision path: ${safeText(event.data.decision ?? 'unavailable')}.`;
+    case 'cache_hit_validated': return 'An exact-scope cached patch was found; current validation is still required.';
     case 'patch_proposed': return `Candidate patch proposed for ${safeText(tool)}; validation is pending.`;
     case 'patch_validated': return 'Candidate passed deterministic validation; it is not committed yet.';
     case 'patch_rejected': {

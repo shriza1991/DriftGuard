@@ -3,7 +3,7 @@ import { api, type DriftGuardApiClient } from './api.ts';
 
 export type StreamStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
 const eventTypes = new Set<RunEventType>([
-  'run_started', 'tool_call_started', 'tool_call_failed', 'diagnosis_started',
+  'run_started', 'tool_call_started', 'tool_call_failed', 'diagnosis_started', 'llm_policy_decision', 'cache_hit_validated',
   'patch_proposed', 'patch_validated', 'patch_rejected', 'retry_started',
   'recovery_verified', 'registry_committed', 'run_completed', 'run_failed',
 ]);

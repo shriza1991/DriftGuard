@@ -6,6 +6,7 @@ import sqlite3
 import json
 import os
 import asyncio
+import hashlib
 from typing import Dict, Any, Optional, List, Tuple
 from pathlib import Path
 from datetime import datetime, timezone
@@ -19,6 +20,8 @@ from orchestrator.audit.models import (
     PersistedRepairAttempt,
     PersistedEvent,
     PersistedModelUsage,
+    PersistedLLMInteraction,
+    PersistedRepairCacheEntry,
 )
 
 
@@ -46,7 +49,7 @@ class SQLiteAuditStore:
     - Demo reset preserves audit history; no destructive purge endpoint.
     """
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def __init__(self, db_path: Optional[str] = None, timeout: float = 5.0):
         self.db_path = str(db_path or settings.sqlite_db_path)
@@ -220,6 +223,75 @@ class SQLiteAuditStore:
                 );""")
                 conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, ?)",
                     (datetime.now(timezone.utc).isoformat(),))
+
+            if current_version < 3:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS llm_interactions (
+                        interaction_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+                        incident_id TEXT NOT NULL,
+                        trial_id TEXT,
+                        created_at TEXT NOT NULL,
+                        duration_ms REAL NOT NULL,
+                        provider TEXT NOT NULL,
+                        model_name TEXT NOT NULL,
+                        prompt_template_version TEXT NOT NULL,
+                        response_schema_version TEXT NOT NULL,
+                        cache_key TEXT,
+                        cache_status TEXT NOT NULL,
+                        sanitized_prompt_hash TEXT NOT NULL,
+                        sanitized_prompt_payload TEXT,
+                        sanitized_response_payload TEXT,
+                        failure_payload TEXT,
+                        response_hash TEXT,
+                        input_tokens INTEGER,
+                        output_tokens INTEGER,
+                        total_tokens INTEGER,
+                        usage_unavailable_reason TEXT,
+                        timed_out BOOLEAN NOT NULL DEFAULT 0,
+                        provider_error TEXT,
+                        parse_status TEXT NOT NULL,
+                        validation_status TEXT NOT NULL,
+                        deterministic_decision TEXT NOT NULL,
+                        reused_later BOOLEAN NOT NULL DEFAULT 0,
+                        retention_until TEXT,
+                        deleted_at TEXT
+                    );
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS validated_repair_cache (
+                        cache_key TEXT PRIMARY KEY,
+                        scope_hashes TEXT NOT NULL,
+                        tool_name TEXT NOT NULL,
+                        base_version TEXT NOT NULL,
+                        base_fingerprint TEXT NOT NULL,
+                        policy_version TEXT NOT NULL,
+                        prompt_version TEXT NOT NULL,
+                        response_schema_version TEXT NOT NULL,
+                        model_configuration_hash TEXT NOT NULL,
+                        operations TEXT NOT NULL,
+                        evidence_references TEXT NOT NULL,
+                        proposal_fingerprint TEXT NOT NULL,
+                        original_interaction_id TEXT NOT NULL REFERENCES llm_interactions(interaction_id),
+                        committed_version TEXT NOT NULL,
+                        committed_fingerprint TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        last_accessed_at TEXT,
+                        hit_count INTEGER NOT NULL DEFAULT 0,
+                        valid BOOLEAN NOT NULL DEFAULT 1,
+                        invalidation_reason TEXT
+                    );
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_interaction_incident ON llm_interactions(incident_id);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_interaction_cache ON llm_interactions(cache_key);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_interaction_status ON llm_interactions(validation_status);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_interaction_created ON llm_interactions(created_at);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_repair_cache_expiry ON validated_repair_cache(expires_at, valid);")
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, ?)",
+                    (datetime.now(timezone.utc).isoformat(),),
+                )
 
             # Cleanup nonterminal runs from prior process interruptions
             now_iso = datetime.now(timezone.utc).isoformat()
@@ -715,6 +787,238 @@ class SQLiteAuditStore:
 
     async def mark_audit_incomplete(self, run_id: str):
         await asyncio.to_thread(self._mark_audit_incomplete_sync, run_id)
+
+    # -------------------------------------------------------------------------
+    # Repair-model interaction and validated-cache persistence
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _canonical_json(value: Any) -> str:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+    def _record_llm_interaction_sync(
+        self, interaction: PersistedLLMInteraction
+    ) -> PersistedLLMInteraction:
+        """Append one redacted interaction record; duplicate IDs fail closed."""
+        self._ensure_init()
+        prompt = redact_secrets(interaction.sanitized_prompt_payload)
+        response = redact_secrets(interaction.sanitized_response_payload)
+        failure = redact_secrets(interaction.failure_payload)
+        prompt_hash = hashlib.sha256(self._canonical_json(prompt).encode("utf-8")).hexdigest()
+        response_hash = (
+            hashlib.sha256(self._canonical_json(response).encode("utf-8")).hexdigest()
+            if response is not None else None
+        )
+        clean = interaction.model_copy(update={
+            "sanitized_prompt_payload": prompt,
+            "sanitized_response_payload": response,
+            "failure_payload": failure,
+            "sanitized_prompt_hash": prompt_hash,
+            "response_hash": response_hash,
+            "provider_error": redact_secrets(interaction.provider_error),
+        })
+        with self._transaction() as conn:
+            conn.execute("""
+                INSERT OR IGNORE INTO runs (run_id, mode, task, status, created_at, audit_status)
+                VALUES (?, 'healing', 'Repair-model diagnosis', 'running', ?, 'complete');
+            """, (clean.run_id, clean.created_at))
+            conn.execute("""
+                INSERT INTO llm_interactions (
+                    interaction_id, run_id, incident_id, trial_id, created_at, duration_ms,
+                    provider, model_name, prompt_template_version, response_schema_version,
+                    cache_key, cache_status, sanitized_prompt_hash, sanitized_prompt_payload,
+                    sanitized_response_payload, failure_payload, response_hash,
+                    input_tokens, output_tokens, total_tokens, usage_unavailable_reason,
+                    timed_out, provider_error, parse_status, validation_status,
+                    deterministic_decision, reused_later, retention_until, deleted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """, (
+                clean.interaction_id, clean.run_id, clean.incident_id, clean.trial_id,
+                clean.created_at, clean.duration_ms, clean.provider, clean.model_name,
+                clean.prompt_template_version, clean.response_schema_version,
+                clean.cache_key, clean.cache_status, clean.sanitized_prompt_hash,
+                self._canonical_json(prompt) if prompt is not None else None,
+                self._canonical_json(response) if response is not None else None,
+                self._canonical_json(failure) if failure is not None else None,
+                clean.response_hash, clean.input_tokens, clean.output_tokens,
+                clean.total_tokens, clean.usage_unavailable_reason,
+                1 if clean.timed_out else 0, clean.provider_error, clean.parse_status,
+                clean.validation_status, clean.deterministic_decision,
+                1 if clean.reused_later else 0, clean.retention_until, clean.deleted_at,
+            ))
+        return clean
+
+    async def record_llm_interaction(
+        self, interaction: PersistedLLMInteraction
+    ) -> PersistedLLMInteraction:
+        return await asyncio.to_thread(self._record_llm_interaction_sync, interaction)
+
+    @staticmethod
+    def _llm_interaction_from_row(row: sqlite3.Row) -> PersistedLLMInteraction:
+        return PersistedLLMInteraction(
+            interaction_id=row["interaction_id"], run_id=row["run_id"],
+            incident_id=row["incident_id"], trial_id=row["trial_id"],
+            created_at=row["created_at"], duration_ms=row["duration_ms"],
+            provider=row["provider"], model_name=row["model_name"],
+            prompt_template_version=row["prompt_template_version"],
+            response_schema_version=row["response_schema_version"],
+            cache_key=row["cache_key"], cache_status=row["cache_status"],
+            sanitized_prompt_hash=row["sanitized_prompt_hash"],
+            sanitized_prompt_payload=json.loads(row["sanitized_prompt_payload"]) if row["sanitized_prompt_payload"] else None,
+            sanitized_response_payload=json.loads(row["sanitized_response_payload"]) if row["sanitized_response_payload"] else None,
+            failure_payload=json.loads(row["failure_payload"]) if row["failure_payload"] else None,
+            response_hash=row["response_hash"], input_tokens=row["input_tokens"],
+            output_tokens=row["output_tokens"], total_tokens=row["total_tokens"],
+            usage_unavailable_reason=row["usage_unavailable_reason"],
+            timed_out=bool(row["timed_out"]), provider_error=row["provider_error"],
+            parse_status=row["parse_status"], validation_status=row["validation_status"],
+            deterministic_decision=row["deterministic_decision"],
+            reused_later=bool(row["reused_later"]), retention_until=row["retention_until"],
+            deleted_at=row["deleted_at"],
+        )
+
+    def _get_run_llm_interactions_sync(self, run_id: str) -> List[PersistedLLMInteraction]:
+        self._ensure_init()
+        conn = self._get_connection()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM llm_interactions WHERE run_id = ? ORDER BY created_at, interaction_id;",
+                (run_id,),
+            ).fetchall()
+            return [self._llm_interaction_from_row(row) for row in rows]
+        finally:
+            conn.close()
+
+    async def get_run_llm_interactions(self, run_id: str) -> List[PersistedLLMInteraction]:
+        return await asyncio.to_thread(self._get_run_llm_interactions_sync, run_id)
+
+    def _finalize_llm_interaction_sync(
+        self, interaction_id: str, validation_status: str, deterministic_decision: str
+    ) -> None:
+        self._ensure_init()
+        with self._transaction() as conn:
+            cursor = conn.execute("""
+                UPDATE llm_interactions
+                SET validation_status = ?, deterministic_decision = ?
+                WHERE interaction_id = ?;
+            """, (validation_status, deterministic_decision, interaction_id))
+            if cursor.rowcount != 1:
+                raise PersistenceError("LLM interaction record was unavailable for finalization")
+
+    async def finalize_llm_interaction(
+        self, interaction_id: str, validation_status: str, deterministic_decision: str
+    ) -> None:
+        await asyncio.to_thread(
+            self._finalize_llm_interaction_sync,
+            interaction_id,
+            validation_status,
+            deterministic_decision,
+        )
+
+    @staticmethod
+    def _repair_cache_from_row(row: sqlite3.Row) -> PersistedRepairCacheEntry:
+        return PersistedRepairCacheEntry(
+            cache_key=row["cache_key"], scope_hashes=json.loads(row["scope_hashes"]),
+            tool_name=row["tool_name"], base_version=row["base_version"],
+            base_fingerprint=row["base_fingerprint"], policy_version=row["policy_version"],
+            prompt_version=row["prompt_version"], response_schema_version=row["response_schema_version"],
+            model_configuration_hash=row["model_configuration_hash"],
+            operations=json.loads(row["operations"]),
+            evidence_references=json.loads(row["evidence_references"]),
+            proposal_fingerprint=row["proposal_fingerprint"],
+            original_interaction_id=row["original_interaction_id"],
+            committed_version=row["committed_version"], committed_fingerprint=row["committed_fingerprint"],
+            created_at=row["created_at"], expires_at=row["expires_at"],
+            last_accessed_at=row["last_accessed_at"], hit_count=row["hit_count"],
+            valid=bool(row["valid"]), invalidation_reason=row["invalidation_reason"],
+        )
+
+    def _put_validated_repair_cache_sync(self, entry: PersistedRepairCacheEntry) -> bool:
+        self._ensure_init()
+        clean_ops = redact_secrets(entry.operations)
+        clean_evidence = redact_secrets(entry.evidence_references)
+        with self._transaction() as conn:
+            cursor = conn.execute("""
+                INSERT OR IGNORE INTO validated_repair_cache (
+                    cache_key, scope_hashes, tool_name, base_version, base_fingerprint,
+                    policy_version, prompt_version, response_schema_version,
+                    model_configuration_hash, operations, evidence_references,
+                    proposal_fingerprint, original_interaction_id, committed_version,
+                    committed_fingerprint, created_at, expires_at, last_accessed_at,
+                    hit_count, valid, invalidation_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """, (
+                entry.cache_key, self._canonical_json(entry.scope_hashes), entry.tool_name,
+                entry.base_version, entry.base_fingerprint, entry.policy_version,
+                entry.prompt_version, entry.response_schema_version,
+                entry.model_configuration_hash, self._canonical_json(clean_ops),
+                self._canonical_json(clean_evidence), entry.proposal_fingerprint,
+                entry.original_interaction_id, entry.committed_version,
+                entry.committed_fingerprint, entry.created_at, entry.expires_at,
+                entry.last_accessed_at, entry.hit_count, 1 if entry.valid else 0,
+                entry.invalidation_reason,
+            ))
+            inserted = cursor.rowcount == 1
+            conn.execute("""
+                UPDATE validated_repair_cache SET valid = 0, invalidation_reason = 'expired'
+                WHERE valid = 1 AND expires_at <= ?;
+            """, (datetime.now(timezone.utc).isoformat(),))
+            overflow = conn.execute("""
+                SELECT cache_key FROM validated_repair_cache WHERE valid = 1
+                ORDER BY COALESCE(last_accessed_at, created_at) DESC, cache_key DESC
+                LIMIT -1 OFFSET ?;
+            """, (max(1, settings.repair_cache_max_entries),)).fetchall()
+            if overflow:
+                conn.executemany(
+                    "UPDATE validated_repair_cache SET valid = 0, invalidation_reason = 'size_eviction' WHERE cache_key = ?;",
+                    [(row["cache_key"],) for row in overflow],
+                )
+        return inserted
+
+    async def put_validated_repair_cache(self, entry: PersistedRepairCacheEntry) -> bool:
+        return await asyncio.to_thread(self._put_validated_repair_cache_sync, entry)
+
+    def _get_validated_repair_cache_sync(self, cache_key: str) -> Optional[PersistedRepairCacheEntry]:
+        self._ensure_init()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM validated_repair_cache WHERE cache_key = ?;", (cache_key,)
+            ).fetchone()
+            if row is None or not bool(row["valid"]):
+                return None
+            if row["expires_at"] <= now_iso:
+                conn.execute(
+                    "UPDATE validated_repair_cache SET valid = 0, invalidation_reason = 'expired' WHERE cache_key = ?;",
+                    (cache_key,),
+                )
+                return None
+            conn.execute("""
+                UPDATE validated_repair_cache
+                SET hit_count = hit_count + 1, last_accessed_at = ? WHERE cache_key = ?;
+            """, (now_iso, cache_key))
+            conn.execute(
+                "UPDATE llm_interactions SET reused_later = 1 WHERE interaction_id = ?;",
+                (row["original_interaction_id"],),
+            )
+            refreshed = conn.execute(
+                "SELECT * FROM validated_repair_cache WHERE cache_key = ?;", (cache_key,)
+            ).fetchone()
+            return self._repair_cache_from_row(refreshed)
+
+    async def get_validated_repair_cache(self, cache_key: str) -> Optional[PersistedRepairCacheEntry]:
+        return await asyncio.to_thread(self._get_validated_repair_cache_sync, cache_key)
+
+    def _invalidate_repair_cache_sync(self, cache_key: str, reason: str) -> None:
+        self._ensure_init()
+        with self._transaction() as conn:
+            conn.execute("""
+                UPDATE validated_repair_cache SET valid = 0, invalidation_reason = ?
+                WHERE cache_key = ?;
+            """, (redact_secrets(reason), cache_key))
+
+    async def invalidate_repair_cache(self, cache_key: str, reason: str) -> None:
+        await asyncio.to_thread(self._invalidate_repair_cache_sync, cache_key, reason)
 
     # -------------------------------------------------------------------------
     # Read Methods
