@@ -27,7 +27,13 @@ wheels/
 
 # Testing & Coverage
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.pyright/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 .tox/
 .nox/
@@ -52,9 +58,16 @@ frontend/dist-ssr/
 
 # Environment & Secrets
 .env
-.env.local
+.env.*
+!.env.example
 *.pem
 *.key
+
+# Local Runtime Output
+*.log
+logs/
+tmp/
+temp/
 
 # IDE & OS
 .vscode/
