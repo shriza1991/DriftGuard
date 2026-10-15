@@ -29,6 +29,11 @@ async def health_check():
     }
 
 
+@app.get("/ready")
+async def readiness_check():
+    return {"status": "ready", "service": "mock_api"}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("mock_api.app:app", host=settings.host, port=settings.port, reload=True)

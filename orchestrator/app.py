@@ -98,6 +98,13 @@ async def health_check():
     }
 
 
+@app.get("/ready")
+async def readiness_check():
+    """Readiness probe for deployment orchestration."""
+    return {"status": "ready", "service": "orchestrator", "registry_initialized": getattr(app.state, "registry", None) is not None,
+            "client_initialized": getattr(app.state, "mock_client", None) is not None}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("orchestrator.app:app", host=settings.host, port=settings.port, reload=True)

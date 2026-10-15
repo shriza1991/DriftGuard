@@ -184,8 +184,18 @@ class HealingAgent:
         active_model = override_model or self._model
         gateway = None
         if active_model is None:
+            # Permit an explicitly injected test/local factory to provide a
+            # deterministic chat model. Normal configured providers continue
+            # through the budgeted gateway below.
+            if not settings.model_api_key:
+                try:
+                    active_model = create_chat_model()
+                except Exception:
+                    active_model = None
+
+        if active_model is None:
             try:
-                gateway = ModelGateway(run_id)
+                gateway = ModelGateway(run_id, model_factory=create_chat_model)
                 provider_model = gateway.create_model()
                 active_model = PlanReplayModel(provider_model, gateway, target_user_name, target_ticket)
             except ModelConfigurationError as e:

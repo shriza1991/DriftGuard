@@ -2,7 +2,6 @@
 from orchestrator.agents.catalogue import get_frozen_v1_catalogue, get_langchain_tool_specs
 from orchestrator.agents.model_provider import create_chat_model, ModelConfigurationError
 from orchestrator.agents.baseline import BaselineAgent
-from orchestrator.agents.healing import HealingAgent
 
 __all__ = [
     "get_frozen_v1_catalogue",
@@ -12,3 +11,11 @@ __all__ = [
     "BaselineAgent",
     "HealingAgent",
 ]
+
+
+def __getattr__(name):
+    """Lazily expose HealingAgent to avoid the llm_diagnosis import cycle."""
+    if name == "HealingAgent":
+        from orchestrator.agents.healing import HealingAgent
+        return HealingAgent
+    raise AttributeError(name)

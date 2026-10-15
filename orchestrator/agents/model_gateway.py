@@ -189,15 +189,21 @@ class BudgetedGroqTransport(httpx.AsyncBaseTransport):
 
 
 class ModelGateway:
-    def __init__(self, run_id: str, db_path: str | None = None, transport: httpx.AsyncBaseTransport | None = None):
+    def __init__(self, run_id: str, db_path: str | None = None, transport: httpx.AsyncBaseTransport | None = None, model_factory=None):
         self.budget = RunCallBudget(run_id, db_path=db_path)
         self.client = httpx.AsyncClient(transport=BudgetedGroqTransport(self.budget, transport), timeout=25)
+        self.model_factory = model_factory
 
     def create_model(self):
         from orchestrator.agents.model_provider import create_chat_model, ModelConfigurationError
         if settings.model_provider.lower() != "groq":
             raise ModelConfigurationError("Bounded live inference requires the configured Groq provider.")
-        return create_chat_model(http_async_client=self.client)
+        factory = self.model_factory or create_chat_model
+        try:
+            return factory(http_async_client=self.client)
+        except TypeError:
+            # Test doubles may intentionally expose a zero-argument factory.
+            return factory()
 
     async def invoke(self, model: Any, messages: Any, purpose: str):
         self.budget.logical_invocation(purpose)

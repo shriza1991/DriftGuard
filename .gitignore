@@ -38,6 +38,11 @@ htmlcov/
 *.sqlite3-wal
 *.sqlite3-shm
 *.db
+driftguard.sqlite3*
+.pytest-tmp*/
+.benchmark-*/
+reports/*
+!reports/.gitkeep
 
 # Node / Frontend
 node_modules/
